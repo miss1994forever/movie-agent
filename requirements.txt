@@ -1,0 +1,12 @@
+mcp>=1.26.0
+google-genai>=1.30.0
+python-dotenv>=1.0.1
+
+# 可选：阿里云百炼 API 支持
+# dashscope>=1.14.0
+
+# 可选：Web 应用开发
+# fastapi>=0.104.0
+# uvicorn[standard]>=0.24.0
+# python-multipart>=0.0.6
+
