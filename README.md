@@ -10,12 +10,31 @@ Python CLI agent that connects to the local Letterboxd MCP server (SSE transport
 
 ## Project Structure
 
-- `movie_agent.py`: Python agent entrypoint.
-- `Letterboxd-MCP/`: Node MCP server implementation.
+```
+movie_rec/
+├── src/                    # Main Python source code
+│   ├── movie_agent.py     # Main CLI agent entrypoint
+│   └── ai_providers.py    # AI provider configurations
+├── Letterboxd-MCP/        # Node.js MCP server implementation
+├── tests/                 # Test files
+├── scripts/               # Utility and setup scripts
+├── docs/                  # Documentation and guides
+├── config/                # Configuration templates
+│   └── .env.example       # Environment configuration template
+├── run.py                 # Main launcher script
+├── requirements.txt       # Python dependencies
+└── README.md              # This file
+```
 
 ## 1) Configure Environment
 
-Create a `.env` file in project root:
+Create a `.env` file in project root (copy from template):
+
+```bash
+cp config/.env.example .env
+```
+
+Then edit `.env` with your credentials:
 
 ```env
 GEMINI_API_KEY=your_gemini_key
@@ -36,7 +55,7 @@ DEBUG_TRACEBACK=false
 ## Letterboxd Account Connection (Step by Step)
 
 1. Optional but recommended: run setup wizard first
-   - `python movie_agent.py --setup`
+   - `python scripts/setup_cookie_login.py` or `python run.py --setup`
    - Follow prompts to write `.env` automatically.
    - Wizard now supports "Letterboxd only" mode (skip Gemini/TMDB updates).
 
@@ -51,10 +70,10 @@ DEBUG_TRACEBACK=false
 5. Install Node dependencies and Playwright browser:
    - `cd Letterboxd-MCP && npm install`
 6. Run agent:
-   - `python movie_agent.py`
+   - `python run.py` (recommended) or `python src/movie_agent.py`
 
 7. Quick auth test (without starting full recommendation flow):
-   - `python movie_agent.py --check-auth`
+   - `python run.py --check-auth`
 
 8. Wait for startup preflight message:
    - `✅ Letterboxd 账号连通检查通过`
@@ -91,8 +110,14 @@ cd ..
 
 ## 3) Run the Agent
 
+**Recommended (using launcher):**
 ```bash
-python movie_agent.py
+python run.py
+```
+
+**Alternative (direct):**
+```bash
+python src/movie_agent.py
 ```
 
 Expected behavior:
@@ -139,5 +164,18 @@ LETTERBOXD_LOGIN_FOR_READS=false
 - To print full Python traceback for debugging:
 
 ```bash
-DEBUG_TRACEBACK=true python movie_agent.py
+DEBUG_TRACEBACK=true python run.py
 ```
+
+## Additional Documentation
+
+See the `docs/` directory for detailed guides:
+- Setup and configuration guides
+- Troubleshooting documentation  
+- API integration guides
+
+## Utility Scripts
+
+The `scripts/` directory contains helper utilities:
+- `diagnose_login.py`: Diagnose Letterboxd login issues
+- `setup_cookie_login.py`: Interactive setup wizard

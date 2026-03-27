@@ -95,6 +95,7 @@ class LetterboxdClient {
     this.loginPromise = null;
     this.browser = null;
     this.browserContext = null;
+    this.routeConfigured = false;
     if (typeof options.browserHeadless === 'boolean') {
       this.browserHeadless = options.browserHeadless;
     } else if (process.env.LETTERBOXD_HEADLESS !== undefined) {
@@ -121,6 +122,96 @@ class LetterboxdClient {
     );
   }
 
+  _extractUserSlugFromCookies() {
+    const candidates = [
+      this.cookies['letterboxd.user.CURRENT'],
+      this.cookies['persona'],
+      this.cookies['letterboxd.session'],
+    ].filter(Boolean);
+
+    const looksLikeSlug = (value) => /^[a-z0-9][a-z0-9_-]{1,40}$/i.test(value || '');
+
+    for (const raw of candidates) {
+      const decoded = (() => {
+        try {
+          return decodeURIComponent(raw);
+        } catch {
+          return String(raw || '');
+        }
+      })();
+
+      if (!decoded) continue;
+
+      if (decoded.startsWith('{') && decoded.endsWith('}')) {
+        try {
+          const obj = JSON.parse(decoded);
+          const maybe = obj?.username || obj?.user || obj?.slug || obj?.member;
+          if (looksLikeSlug(maybe)) return maybe;
+        } catch {}
+      }
+
+      const patterns = [
+        /"username"\s*:\s*"([a-z0-9_-]{2,40})"/i,
+        /"slug"\s*:\s*"([a-z0-9_-]{2,40})"/i,
+        /(?:^|[&;|,:\s])username=([a-z0-9_-]{2,40})(?:$|[&;|,:\s])/i,
+        /(?:^|[&;|,:\s])user=([a-z0-9_-]{2,40})(?:$|[&;|,:\s])/i,
+        /(?:^|[&;|,:\s])slug=([a-z0-9_-]{2,40})(?:$|[&;|,:\s])/i,
+      ];
+      for (const re of patterns) {
+        const m = decoded.match(re);
+        if (m && looksLikeSlug(m[1])) return m[1];
+      }
+
+      if (looksLikeSlug(decoded)) return decoded;
+    }
+
+    return '';
+  }
+
+  _extractFilmIdFromHtml(html, slug = '') {
+    const text = String(html || '');
+    const patterns = [
+      /data-film-id=["'](\d+)["']/i,
+      /"uid"\s*:\s*"film:(\d+)"/i,
+      /data-viewingable\.uid\s*=\s*'film:(\d+)'/i,
+      /data-viewingable\.uid\s*=\s*"film:(\d+)"/i,
+      /\/film\/[a-z0-9\-]+\/json\/["']?\s*[^\n]*?film:(\d+)/i,
+    ];
+
+    for (const re of patterns) {
+      const m = text.match(re);
+      if (m && m[1]) return String(m[1]);
+    }
+
+    // Slug-aware fallback for chunks containing item metadata.
+    if (slug) {
+      const slugSafe = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const slugRe = new RegExp(`data-item-slug=["']${slugSafe}["'][^>]*data-film-id=["'](\\d+)["']`, 'i');
+      const m = text.match(slugRe);
+      if (m && m[1]) return String(m[1]);
+    }
+
+    return '';
+  }
+
+  _getCsrfToken(html = '') {
+    const fromCookie = decodeURIComponent((this.cookies['com.xk72.webparts.csrf'] || '').trim());
+    if (fromCookie && fromCookie !== 'placeholder') return fromCookie;
+
+    const text = String(html || '');
+    const m = text.match(/name=["']__csrf["'][^>]*value=["']([^"']+)["']/i);
+    if (m && m[1] && m[1] !== 'placeholder') return m[1];
+    return '';
+  }
+
+  async _resolveFilmMeta(slug) {
+    const filmUrl = `${this.baseUrl}/film/${slug}/`;
+    const html = await this.fetchHtml(filmUrl, { skipLogin: true });
+    const filmId = this._extractFilmIdFromHtml(html, slug);
+    const csrf = this._getCsrfToken(html);
+    return { filmUrl, filmId, csrf };
+  }
+
   async refreshLoginState() {
     const markerCookies =
       this.cookies['letterboxd.user.CURRENT'] ||
@@ -129,13 +220,39 @@ class LetterboxdClient {
 
     if (markerCookies) {
       this.isLoggedIn = true;
+      if (!this.username || this.username.includes('@')) {
+        const cookieSlug = this._extractUserSlugFromCookies();
+        if (cookieSlug) this.username = cookieSlug;
+      }
     }
 
     try {
       const home = await this._request('GET', this.baseUrl, { skipLogin: true });
-      const html = typeof home.data === 'string' ? home.data : '';
-      const slug = this._extractUserSlugFromHtml(html);
-      if (slug) {
+      const homeHtml = typeof home.data === 'string' ? home.data : '';
+      let slug = this._extractUserSlugFromHtml(homeHtml);
+
+      // Fallback: /me/ usually resolves to the authenticated profile page,
+      // which is often easier to parse than the home feed shell.
+      if (!slug || slug.includes('@')) {
+        try {
+          const mePage = await this._request('GET', `${this.baseUrl}/me/`, { skipLogin: true });
+          const meHtml = typeof mePage.data === 'string' ? mePage.data : '';
+          slug = this._extractUserSlugFromHtml(meHtml) || slug;
+
+          if (!slug || slug.includes('@')) {
+            const finalUrl = mePage?.finalUrl || '';
+            try {
+              const parsed = new URL(finalUrl);
+              const parts = parsed.pathname.split('/').filter(Boolean);
+              if (parts.length && parts[0] !== 'me' && parts[0] !== 'sign-in') {
+                slug = parts[0];
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+
+      if (slug && !slug.includes('@')) {
         this.isLoggedIn = true;
         this.username = slug;
       }
@@ -239,7 +356,8 @@ class LetterboxdClient {
         continue;
       }
 
-      return response;
+        response.finalUrl = currentUrl;
+        return response;
     }
 
     throw new Error('Too many redirects.');
@@ -303,8 +421,6 @@ class LetterboxdClient {
         const node = $(el);
         const poster = node.hasClass('film-poster') ? node : node.find('.film-poster').first();
         const dataName =
-          node.attr('data-film-name') ||
-          node.attr('data-item-name') ||
           poster.attr('data-film-name') ||
           poster.attr('data-item-name') ||
           node.find('[data-film-name]').attr('data-film-name') ||
@@ -1304,6 +1420,58 @@ class LetterboxdClient {
         };
       }
     }
+    if (this.isLoggedIn && (!this.username || this.username.includes('@'))) {
+      try {
+        await this.refreshLoginState();
+      } catch {}
+
+      if (!this.username || this.username.includes('@')) {
+        try {
+          await this._ensureBrowser();
+          const page = await this.browserContext.newPage();
+          try {
+            await page.goto(`${this.baseUrl}/me/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.waitForTimeout(600);
+
+            const currentUrl = page.url();
+            const parsed = new URL(currentUrl);
+            const parts = parsed.pathname.split('/').filter(Boolean);
+            if (parts.length && parts[0] !== 'me' && parts[0] !== 'sign-in') {
+              this.username = parts[0];
+            }
+
+            if (!this.username || this.username.includes('@')) {
+              const slugFromPage = await page.evaluate(() => {
+                const bodySlug = document.body?.getAttribute('data-user-name');
+                if (bodySlug) return bodySlug;
+                const accountHref = document.querySelector('.nav-account a, .nav-main-right .nav-account > a')?.getAttribute('href') || '';
+                const segs = accountHref.split('/').filter(Boolean);
+                return segs.length ? segs[segs.length - 1] : '';
+              });
+              if (slugFromPage && !slugFromPage.includes('@')) {
+                this.username = slugFromPage;
+              }
+            }
+          } finally {
+            await page.close();
+          }
+        } catch {}
+      }
+
+      if (!this.username || this.username.includes('@')) {
+        const cookieSlug = this._extractUserSlugFromCookies();
+        if (cookieSlug) {
+          this.username = cookieSlug;
+        }
+      }
+
+      if (!this.username || this.username.includes('@')) {
+        const envUser = process.env.LETTERBOXD_USERNAME;
+        if (envUser && !envUser.includes('@')) {
+          this.username = envUser;
+        }
+      }
+    }
     return { username: this.username, loggedIn: this.isLoggedIn };
   }
 
@@ -1364,6 +1532,18 @@ class LetterboxdClient {
       });
     }
 
+    if (BLOCK_AD_REQUESTS && !this.routeConfigured) {
+      await this.browserContext.route('**/*', async (route) => {
+        const reqUrl = route.request().url();
+        if (shouldBlockUrl(reqUrl)) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      });
+      this.routeConfigured = true;
+    }
+
     const cookies = Object.entries(this.cookies).map(([name, value]) => ({
       name,
       value,
@@ -1373,26 +1553,68 @@ class LetterboxdClient {
     await this.browserContext.addCookies(cookies);
   }
 
-  async _performAction(url, actionFn) {
+  async _performAction(url, actionFn, options = {}) {
     await this._ensureBrowser();
+    // Always sync latest cookies into the browser context before each action.
+    // _ensureBrowser only injects cookies at creation time, but login may have
+    // happened after the browser was already created, leaving it unauthenticated.
+    if (Object.keys(this.cookies).length > 0) {
+      const freshCookies = Object.entries(this.cookies).map(([name, value]) => ({
+        name,
+        value,
+        domain: '.letterboxd.com',
+        path: '/',
+      }));
+      await this.browserContext.addCookies(freshCookies);
+    }
     const page = await this.browserContext.newPage();
     try {
       console.log(`[_performAction] 导航到: ${url}`);
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      let lastNavErr = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          lastNavErr = null;
+          break;
+        } catch (err) {
+          lastNavErr = err;
+          const msg = String(err && err.message ? err.message : err);
+          const retryable =
+            msg.includes('ERR_HTTP_RESPONSE_CODE_FAILURE') ||
+            msg.includes('ERR_CONNECTION_RESET') ||
+            msg.includes('ERR_CONNECTION_CLOSED') ||
+            msg.includes('ERR_NETWORK_CHANGED') ||
+            msg.includes('Timeout');
+          if (!retryable || attempt >= 3) {
+            throw err;
+          }
+
+          // Warm up the session between retries; this often clears transient anti-bot/network hiccups.
+          try {
+            await page.goto(this.baseUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          } catch {}
+          await page.waitForTimeout(1200 * attempt);
+        }
+      }
+      if (lastNavErr) throw lastNavErr;
+
+      const title = await page.title().catch(() => '');
+      const hasChallenge = await page.evaluate(() => {
+        return !!document.querySelector('#cf-wrapper,#challenge-stage,#challenge-error-title');
+      }).catch(() => false);
+
+      const looksBlocked = hasChallenge || /\b520\b|Just a moment|unknown error/i.test(String(title || ''));
+      if (looksBlocked && this.browserHeadless && !options.visibleRetry) {
+        console.warn(`[_performAction] 检测到 Cloudflare/520 页面，切换到可视浏览器重试: ${title}`);
+        await page.close();
+        await this.close().catch(() => {});
+        this.browserHeadless = false;
+        return this._performAction(url, actionFn, { ...options, visibleRetry: true });
+      }
+
       await page.waitForTimeout(1000);
       console.log(`[_performAction] 页面加载完成`);
       await actionFn(page);
-
-          if (BLOCK_AD_REQUESTS) {
-            await this.browserContext.route('**/*', async (route) => {
-              const reqUrl = route.request().url();
-              if (shouldBlockUrl(reqUrl)) {
-                await route.abort();
-                return;
-              }
-              await route.continue();
-            });
-          }
       
       // Sync back cookies from browser
       const newCookies = await this.browserContext.cookies();
@@ -1439,70 +1661,118 @@ class LetterboxdClient {
   async addToWatched(slug, remove = false) {
     await this.ensureLoggedIn();
     console.log(`[addToWatched] 开始处理: slug=${slug}, remove=${remove}`);
-    
-    return this._performAction(`${this.baseUrl}/film/${slug}/`, async (page) => {
+
+    let meta = { filmUrl: `${this.baseUrl}/film/${slug}/`, filmId: '', csrf: '' };
+    try {
+      meta = await this._resolveFilmMeta(slug);
+    } catch (e) {
+      console.warn(`[addToWatched] 预读取电影元数据失败，将回退到页面提取: ${e.message}`);
+    }
+
+    try {
+      return await this._performAction(meta.filmUrl, async (page) => {
       try {
-        console.log(`[addToWatched] 页面已加载: ${this.baseUrl}/film/${slug}/`);
-        
-        // 尝试多个可能的选择器
+        console.log(`[addToWatched] 页面已加载: ${meta.filmUrl}`);
+
+        let filmId = meta.filmId;
+        let csrf = meta.csrf;
+        if (!filmId || !csrf) {
+          const domMeta = await page.evaluate(() => {
+            const html = document.documentElement?.outerHTML || '';
+            const filmIdMatch = html.match(/data-film-id=["'](\d+)["']/i) || html.match(/"uid"\s*:\s*"film:(\d+)"/i);
+            const cookieCsrf = document.cookie.split('; ').find(r => r.startsWith('com.xk72.webparts.csrf='))?.split('=')[1] || '';
+            const inputCsrf = (document.querySelector('input[name="__csrf"]')?.getAttribute('value') || '').trim();
+            return {
+              filmId: filmIdMatch ? filmIdMatch[1] : '',
+              csrf: decodeURIComponent((cookieCsrf || inputCsrf || '').trim()),
+            };
+          });
+          filmId = filmId || domMeta.filmId;
+          csrf = csrf || domMeta.csrf;
+        }
+
+        if (!filmId) throw new Error('无法提取 film ID（页面未返回电影元数据）');
+        if (!csrf || csrf === 'placeholder') throw new Error('无法获取有效 CSRF token，session 可能已过期');
+
+        console.log(`[addToWatched] filmId=${filmId}, CSRF 已获取`);
+
+        // 通过 AJAX 调用 Letterboxd 内部接口
+        const ajaxResult = await page.evaluate(async ({ filmId, csrf, remove }) => {
+          const endpoints = [
+            '/s/save-film-to-owned',
+            '/s/toggle-film-watched',
+          ];
+          for (const endpoint of endpoints) {
+            try {
+              const body = new URLSearchParams();
+              body.append('__csrf', csrf);
+              body.append('filmId', filmId);
+              if (remove) body.append('remove', 'true');
+              const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                  'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: body.toString(),
+              });
+              const text = await res.text();
+              if (res.ok || res.status === 200) {
+                return { ok: true, endpoint, status: res.status, body: text };
+              }
+            } catch (e) {
+              // try next endpoint
+            }
+          }
+          return { ok: false };
+        }, { filmId, csrf, remove });
+
+        if (ajaxResult && ajaxResult.ok) {
+          console.log(`[addToWatched] ✅ AJAX 操作成功 (${ajaxResult.endpoint}, status=${ajaxResult.status})`);
+          return;
+        }
+
+        console.log(`[addToWatched] AJAX 未成功，改用 DOM 点击...`);
+
+        // 回退：DOM 点击
         const selectors = [
+          '.action.-watched a',
+          '.action.-watched',
+          '[data-action-toggle="watched"]',
+          '.toggle-film-on-list.-watched',
           '.sidebar .action.-watch',
-          '.sidebar .watch-button', 
+          '.sidebar .watch-button',
           '.sidebar .action-large.-watch',
           '.film-actions .action.-watch',
-          'button[data-action="watch"]'
+          'button[data-action="watch"]',
         ];
         
         let watchBtn = null;
         for (const selector of selectors) {
           try {
             watchBtn = page.locator(selector).first();
-            await watchBtn.waitFor({ state: 'visible', timeout: 3000 });
+            await watchBtn.waitFor({ state: 'visible', timeout: 5000 });
             console.log(`[addToWatched] 找到按钮: ${selector}`);
             break;
           } catch (e) {
             console.log(`[addToWatched] 选择器 ${selector} 未找到，尝试下一个...`);
+            watchBtn = null;
           }
         }
         
         if (!watchBtn) {
-          throw new Error('未找到watch按钮');
+          throw new Error('AJAX 和所有 DOM 选择器均失败，无法找到 watched 按钮。请检查 Letterboxd 是否已登录以及页面结构。');
         }
         
         const classAttr = await watchBtn.getAttribute('class') || '';
         const isCurrentlyWatched = classAttr.includes('-active') || classAttr.includes('own');
         
         console.log(`[addToWatched] 当前状态: ${isCurrentlyWatched ? '已标记watched' : '未标记watched'}`);
-        console.log(`[addToWatched] 按钮类名: ${classAttr}`);
         
         if ((!remove && !isCurrentlyWatched) || (remove && isCurrentlyWatched)) {
-          console.log(`[addToWatched] 执行点击操作...`);
           await watchBtn.click();
-          
-          // 等待操作完成
           await page.waitForTimeout(2000);
-          
-          // 尝试验证状态变化（但不因验证失败而报错）
-          try {
-            const newBtn = page.locator(selectors[0]).first();
-            await newBtn.waitFor({ state: 'visible', timeout: 3000 });
-            const newClassAttr = await newBtn.getAttribute('class') || '';
-            const newIsWatched = newClassAttr.includes('-active') || newClassAttr.includes('own');
-            
-            console.log(`[addToWatched] 点击后状态: ${newIsWatched ? '已标记watched' : '未标记watched'}`);
-            console.log(`[addToWatched] 新类名: ${newClassAttr}`);
-            
-            if (remove && newIsWatched) {
-              console.log(`[addToWatched] ⚠️ 警告: 删除后电影仍显示watched，但操作可能已成功`);
-            }
-            if (!remove && !newIsWatched) {
-              console.log(`[addToWatched] ⚠️ 警告: 添加后电影未显示watched，但操作可能已成功`);
-            }
-          } catch (verifyError) {
-            console.log(`[addToWatched] ⚠️ 无法验证操作结果（${verifyError.message}），但点击已执行`);
-          }
-          
-          console.log(`[addToWatched] ✅ 操作已执行`);
+          console.log(`[addToWatched] ✅ DOM 点击操作已执行`);
         } else {
           console.log(`[addToWatched] 已在目标状态，无需操作`);
         }
@@ -1510,77 +1780,181 @@ class LetterboxdClient {
         console.error(`[addToWatched] ❌ 错误: ${error.message}`);
         throw error;
       }
-    });
+      });
+    } catch (error) {
+      const msg = String(error && error.message ? error.message : error);
+      const shouldTryHttpFallback =
+        msg.includes('ERR_HTTP_RESPONSE_CODE_FAILURE') ||
+        msg.includes('无法找到 watched 按钮') ||
+        msg.includes('Cloudflare') ||
+        msg.includes('520');
+      if (!shouldTryHttpFallback) {
+        throw error;
+      }
+
+      console.warn(`[addToWatched] 页面导航失败，尝试 HTTP 兜底: ${msg}`);
+
+      const html = await this.fetchHtml(`${this.baseUrl}/film/${slug}/`, { skipLogin: true });
+      const $ = cheerio.load(typeof html === 'string' ? html : '');
+      const filmId =
+        $('[data-film-id]').first().attr('data-film-id') ||
+        $('.react-component[data-film-id]').first().attr('data-film-id') ||
+        '';
+      if (!filmId) {
+        throw new Error(`[addToWatched] HTTP 兜底失败：未能从页面提取 filmId (${slug})`);
+      }
+
+      const csrfFromCookie = this.cookies['com.xk72.webparts.csrf'] || '';
+      const csrfFromHtml = $('input[name="__csrf"]').first().attr('value') || '';
+      const csrf = decodeURIComponent((csrfFromCookie || csrfFromHtml || '').trim());
+      if (!csrf || csrf === 'placeholder') {
+        throw new Error('[addToWatched] HTTP 兜底失败：缺少有效 CSRF token');
+      }
+
+      const endpoints = ['/s/save-film-to-owned', '/s/toggle-film-watched'];
+      let lastStatus = 0;
+      for (const endpoint of endpoints) {
+        const body = new URLSearchParams();
+        body.append('__csrf', csrf);
+        body.append('filmId', String(filmId));
+        if (remove) body.append('remove', 'true');
+
+        const res = await this._request('POST', `${this.baseUrl}${endpoint}`, {
+          data: body.toString(),
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': `${this.baseUrl}/film/${slug}/`,
+            'Origin': this.baseUrl,
+          },
+          skipLogin: true,
+        });
+        lastStatus = res.status;
+        if (res.status >= 200 && res.status < 400) {
+          console.log(`[addToWatched] ✅ HTTP 兜底成功 (${endpoint}, status=${res.status})`);
+          return true;
+        }
+      }
+
+      throw new Error(`[addToWatched] HTTP 兜底失败，最后状态码: ${lastStatus}`);
+    }
   }
 
   async addToWatchlist(slug, remove = false) {
     await this.ensureLoggedIn();
     console.log(`[addToWatchlist] 开始处理: slug=${slug}, remove=${remove}`);
+
+    let meta = { filmUrl: `${this.baseUrl}/film/${slug}/`, filmId: '', csrf: '' };
+    try {
+      meta = await this._resolveFilmMeta(slug);
+    } catch (e) {
+      console.warn(`[addToWatchlist] 预读取电影元数据失败，将回退到页面提取: ${e.message}`);
+    }
     
-    return this._performAction(`${this.baseUrl}/film/${slug}/`, async (page) => {
+    return this._performAction(meta.filmUrl, async (page) => {
       try {
-        console.log(`[addToWatchlist] 页面已加载: ${this.baseUrl}/film/${slug}/`);
-        
-        // 尝试多个可能的选择器
+        console.log(`[addToWatchlist] 页面已加载: ${meta.filmUrl}`);
+
+        let filmId = meta.filmId;
+        let csrf = meta.csrf;
+        if (!filmId || !csrf) {
+          const domMeta = await page.evaluate(() => {
+            const html = document.documentElement?.outerHTML || '';
+            const filmIdMatch = html.match(/data-film-id=["'](\d+)["']/i) || html.match(/"uid"\s*:\s*"film:(\d+)"/i);
+            const cookieCsrf = document.cookie.split('; ').find(r => r.startsWith('com.xk72.webparts.csrf='))?.split('=')[1] || '';
+            const inputCsrf = (document.querySelector('input[name="__csrf"]')?.getAttribute('value') || '').trim();
+            return {
+              filmId: filmIdMatch ? filmIdMatch[1] : '',
+              csrf: decodeURIComponent((cookieCsrf || inputCsrf || '').trim()),
+            };
+          });
+          filmId = filmId || domMeta.filmId;
+          csrf = csrf || domMeta.csrf;
+        }
+
+        if (!filmId) throw new Error('无法提取 film ID（页面未返回电影元数据）');
+        if (!csrf || csrf === 'placeholder') throw new Error('无法获取有效 CSRF token，session 可能已过期');
+
+        console.log(`[addToWatchlist] filmId=${filmId}, CSRF 已获取`);
+
+        // 通过 AJAX 调用 Letterboxd 内部接口（与 /s/save-diary-entry 同一模式）
+        const ajaxResult = await page.evaluate(async ({ filmId, csrf, remove }) => {
+          const endpoints = [
+            '/s/save-film-to-watchlist',
+            '/s/toggle-film-watchlist',
+          ];
+          for (const endpoint of endpoints) {
+            try {
+              const body = new URLSearchParams();
+              body.append('__csrf', csrf);
+              body.append('filmId', filmId);
+              if (remove) body.append('remove', 'true');
+              const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                  'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: body.toString(),
+              });
+              const text = await res.text();
+              if (res.ok || res.status === 200) {
+                return { ok: true, endpoint, status: res.status, body: text };
+              }
+              // Non-2xx: try next endpoint
+            } catch (e) {
+              // Network error: try next endpoint
+            }
+          }
+          return { ok: false };
+        }, { filmId, csrf, remove });
+
+        if (ajaxResult && ajaxResult.ok) {
+          console.log(`[addToWatchlist] ✅ AJAX 操作成功 (${ajaxResult.endpoint}, status=${ajaxResult.status})`);
+          return;
+        }
+
+        console.log(`[addToWatchlist] AJAX 未成功，改用 DOM 点击...`);
+
+        // 回退：DOM 点击，包含 Letterboxd 当前已知的选择器和旧版选择器
         const selectors = [
+          '.action.-wishlist a',          // 当前版本: wishlist 是 watchlist 的内部名称
+          '.action.-wishlist',
+          'a.action.-wishlist',
+          '[data-action-toggle="watchlist"]',
+          '.toggle-film-on-list.-watchlist',
           'a.add-to-watchlist',
           '.action-large.-watchlist',
           'button[data-action="watchlist"]',
-          '.film-actions .watchlist-button'
+          '.film-actions .watchlist-button',
         ];
         
         let watchlistBtn = null;
         for (const selector of selectors) {
           try {
             watchlistBtn = page.locator(selector).first();
-            await watchlistBtn.waitFor({ state: 'visible', timeout: 3000 });
+            await watchlistBtn.waitFor({ state: 'visible', timeout: 5000 });
             console.log(`[addToWatchlist] 找到按钮: ${selector}`);
             break;
           } catch (e) {
             console.log(`[addToWatchlist] 选择器 ${selector} 未找到，尝试下一个...`);
+            watchlistBtn = null;
           }
         }
         
         if (!watchlistBtn) {
-          throw new Error('未找到watchlist按钮');
+          throw new Error('AJAX 和所有 DOM 选择器均失败，无法找到 watchlist 按钮。请检查 Letterboxd 是否已登录以及页面结构。');
         }
         
         const classAttr = await watchlistBtn.getAttribute('class') || '';
-        const isCurrentlyIn = classAttr.includes('-remove') || classAttr.includes('own') || classAttr.includes('-active');
+        const isCurrentlyIn = classAttr.includes('-remove') || classAttr.includes('own') || classAttr.includes('-active') || classAttr.includes('-wishlisted');
         
         console.log(`[addToWatchlist] 当前状态: ${isCurrentlyIn ? '已在watchlist' : '不在watchlist'}`);
-        console.log(`[addToWatchlist] 按钮类名: ${classAttr}`);
 
         if ((!remove && !isCurrentlyIn) || (remove && isCurrentlyIn)) {
-          console.log(`[addToWatchlist] 执行点击操作...`);
           await watchlistBtn.click();
-          
-          // 等待操作完成（AJAX请求）
           await page.waitForTimeout(2000);
-          
-          // 尝试验证状态变化（但不因验证失败而报错）
-          try {
-            // 重新查找按钮（因为可能被替换了）
-            const newBtn = page.locator(selectors[0]).first();
-            await newBtn.waitFor({ state: 'visible', timeout: 3000 });
-            const newClassAttr = await newBtn.getAttribute('class') || '';
-            const newIsIn = newClassAttr.includes('-remove') || newClassAttr.includes('own') || newClassAttr.includes('-active');
-            
-            console.log(`[addToWatchlist] 点击后状态: ${newIsIn ? '已在watchlist' : '不在watchlist'}`);
-            console.log(`[addToWatchlist] 新类名: ${newClassAttr}`);
-            
-            // 如果状态不对，记录警告但不抛出错误（因为操作可能已经成功）
-            if (remove && newIsIn) {
-              console.log(`[addToWatchlist] ⚠️ 警告: 删除后电影仍显示在watchlist，但操作可能已成功`);
-            }
-            if (!remove && !newIsIn) {
-              console.log(`[addToWatchlist] ⚠️ 警告: 添加后电影未显示在watchlist，但操作可能已成功`);
-            }
-          } catch (verifyError) {
-            console.log(`[addToWatchlist] ⚠️ 无法验证操作结果（${verifyError.message}），但点击已执行`);
-          }
-          
-          console.log(`[addToWatchlist] ✅ 操作已执行`);
+          console.log(`[addToWatchlist] ✅ DOM 点击操作已执行`);
         } else {
           console.log(`[addToWatchlist] 已在目标状态，无需操作`);
         }
@@ -1599,12 +1973,45 @@ class LetterboxdClient {
             const likeBtn = page.locator(`.review-like[data-review-id="${reviewId}"]`);
             await likeBtn.click();
         } else {
-            // Target only the main film like button in the sidebar
-            const likeBtn = page.locator('.sidebar .like-link-target, #featured-film-header .like-link-target').first();
+            const selectors = [
+              '.sidebar .like-link-target',
+              '#featured-film-header .like-link-target',
+              '.js-actions-panel-like .like-link-target',
+              '.react-component.like-link-target[data-likeable="true"]',
+              '[data-component-class="LikeComponent"][data-likeable-identifier*="film:"]',
+              '.like-link-target[data-likeable-identifier*="film:"]',
+            ];
+
+            let likeBtn = null;
+            for (const selector of selectors) {
+              try {
+                const candidate = page.locator(selector).first();
+                await candidate.waitFor({ state: 'attached', timeout: 3000 });
+                likeBtn = candidate;
+                console.log(`[toggleLike] 找到 like 按钮: ${selector}`);
+                break;
+              } catch (e) {
+                // try next selector
+              }
+            }
+
+            if (!likeBtn) {
+              const debug = await page.evaluate(() => {
+                return {
+                  title: document.title,
+                  hasCloudflare: !!document.querySelector('#cf-wrapper,#challenge-stage,#challenge-error-title'),
+                  filmLikeCandidates: document.querySelectorAll('[data-component-class="LikeComponent"][data-likeable-identifier*="film:"]').length,
+                  sidebarLikeCandidates: document.querySelectorAll('.sidebar .like-link-target').length,
+                };
+              });
+              throw new Error(`未找到主电影 like 按钮: ${JSON.stringify(debug)}`);
+            }
+
             const classAttr = await likeBtn.getAttribute('class') || '';
-            const isLiked = classAttr.includes('active');
+            const ariaPressed = await likeBtn.getAttribute('aria-pressed');
+            const isLiked = classAttr.includes('active') || ariaPressed === 'true';
             if ((!remove && !isLiked) || (remove && isLiked)) {
-                await likeBtn.click();
+                await likeBtn.click({ timeout: 8000 });
             }
         }
         await page.waitForTimeout(1000);
@@ -1744,6 +2151,7 @@ class LetterboxdClient {
       await this.browserContext.close();
       this.browserContext = null;
       this.browser = null;
+      this.routeConfigured = false;
     }
   }
 }

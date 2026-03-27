@@ -11,6 +11,11 @@ from contextlib import suppress
 from getpass import getpass
 from dotenv import load_dotenv, set_key
 
+# 确保可以导入同目录下的模块
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
 # 1. 导入 2026 最新 SDK
 from google import genai
 from ai_providers import get_ai_provider, get_default_model
@@ -89,25 +94,33 @@ def parse_tool_json(tool_result):
         return {}
 
 
-def build_watchlist_brief(watchlist_payload, limit=120):
-    items = watchlist_payload.get("items", []) if isinstance(watchlist_payload, dict) else []
-    pairs = []
+def build_brief_list(payload, limit=30, key_fields=None):
+    """通用的数据摘要构建函数，支持多种数据格式"""
+    if key_fields is None:
+        key_fields = ["title", "slug"]
+    
+    # 统一数据格式
+    if isinstance(payload, dict):
+        items = payload.get("items") or payload.get("films") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        return []
+    
+    result = []
     for item in items[:limit]:
-        title = (item or {}).get("title") or ""
-        slug = (item or {}).get("slug") or ""
-        if title and slug:
-            pairs.append({"title": title, "slug": slug})
-    return pairs
+        if not item:
+            continue
+        entry = {}
+        for field in key_fields:
+            value = item.get(field, "")
+            if value:
+                entry[field] = value
+        if len(entry) >= len(key_fields) // 2:  # 至少有一半字段有值
+            result.append(entry)
+    
+    return result
 
-
-def slugs_from_watchlist(watchlist_payload):
-    items = watchlist_payload.get("items", []) if isinstance(watchlist_payload, dict) else []
-    out = set()
-    for item in items:
-        slug = (item or {}).get("slug")
-        if slug:
-            out.add(slug)
-    return out
 
 
 def response_mentions_any_slug(text, slug_set):
@@ -179,74 +192,167 @@ def normalize_star_to_internal_rating(star_text):
     return int(doubled)
 
 
+async def get_user_context_data(session, existing_watchlist=None):
+    """统一获取用户上下文数据，防止冗余代码和上下文过长"""
+    context_lines = []
+    
+    try:
+        # 获取用户信息
+        me_raw = await session.call_tool("get_current_user", arguments={"tryLogin": False})
+        me_payload = parse_tool_json(me_raw)
+        username = (me_payload or {}).get("username") if isinstance(me_payload, dict) else None
+        if username:
+            context_lines.append(f"当前用户: {username}")
+            print(f"   ✓ 已获取用户信息: {username}")
+    except Exception:
+        pass
+
+    # 读取 Watchlist（限制30条避免上下文过长）
+    try:
+        watchlist_data = existing_watchlist
+        if not watchlist_data:
+            print("   🔍 正在读取 Watchlist...")
+            wl_raw = await session.call_tool("get_member_watchlist", arguments={"username": "me", "maxPages": 1})
+            wl_payload = parse_tool_json(wl_raw)
+            watchlist_data = build_brief_list(wl_payload, limit=30)
+        
+        if watchlist_data:
+            preview = ", ".join([f"{x.get('title','')}({x.get('slug','')})" for x in watchlist_data[:12]])
+            context_lines.append(f"用户 watchlist 样本: {preview}")
+            print(f"   ✓ 已获取 Watchlist: {len(watchlist_data)} 部电影")
+    except Exception:
+        pass
+
+    # 读取 Favorites（限制8条）
+    try:
+        print("   🔍 正在读取 Favorites...")
+        pinned_raw = await session.call_tool("get_member_pinned", arguments={"username": "me"})
+        pinned_payload = parse_tool_json(pinned_raw)
+        if pinned_payload and isinstance(pinned_payload, dict):
+            pinned_films = build_brief_list(pinned_payload, limit=8, key_fields=["title", "year", "slug"])
+            if pinned_films:
+                pinned_preview = ", ".join([f"{film.get('title','')}({film.get('year','')})" for film in pinned_films])
+                context_lines.append(f"用户最爱电影: {pinned_preview}")
+                print(f"   ✓ 已获取 Favorites: {len(pinned_films)} 部电影")
+    except Exception as e:
+        print(f"   ⚠️ 无法获取 Favorites: {e}")
+
+    # 读取观影历史（限制15条，重点关注高评分）
+    try:
+        print("   🔍 正在读取观影历史...")
+        films_raw = await session.call_tool("get_member_films", arguments={"username": "me", "maxPages": 1})
+        films_payload = parse_tool_json(films_raw)
+        recent_films = build_brief_list(films_payload, limit=15, key_fields=["title", "year", "rating"])
+        
+        if recent_films:
+            # 优先获取高评分电影以了解偏好
+            high_rated = [f for f in recent_films if f.get('rating', 0) >= 4][:6]
+            if high_rated:
+                high_rated_preview = ", ".join([f"{film.get('title','')}({film.get('rating','')}/5)" for film in high_rated])
+                context_lines.append(f"用户高评分电影: {high_rated_preview}")
+                print(f"   ✓ 已获取高评分电影: {len(high_rated)} 部")
+            
+            recent_preview = ", ".join([f"{film.get('title','')}({film.get('year','')})" for film in recent_films[:10]])
+            context_lines.append(f"用户近期观影: {recent_preview}")
+            print(f"   ✓ 已获取观影历史: {len(recent_films)} 部电影")
+    except Exception as e:
+        print(f"   ⚠️ 无法获取观影历史: {e}")
+
+    # 读取观影日记（修复404错误，限制5条）
+    try:
+        print("   🔍 正在读取观影日记...")
+        # 尝试多种可能的API调用方式
+        diary_raw = None
+        try:
+            # 方法1: 标准调用
+            diary_raw = await session.call_tool("get_member_diary", arguments={"username": "me", "maxPages": 1})
+        except Exception:
+            try:
+                # 方法2: 不带参数
+                diary_raw = await session.call_tool("get_member_diary", arguments={})
+            except Exception:
+                # 方法3: 使用不同的参数格式
+                diary_raw = await session.call_tool("get_member_diary", arguments={"member": "me"})
+        
+        if diary_raw:
+            diary_payload = parse_tool_json(diary_raw)
+            diary_entries = build_brief_list(diary_payload, limit=5, key_fields=["title", "watchedDate"])
+            if diary_entries:
+                recent_diary = ", ".join([f"{entry.get('title','')}({entry.get('watchedDate','')})" for entry in diary_entries])
+                context_lines.append(f"用户近期日记: {recent_diary}")
+                print(f"   ✓ 已获取观影日记: {len(diary_entries)} 条记录")
+    except Exception as e:
+        print(f"   ⚠️ 无法获取观影日记: Request failed with status 404")
+        print("   💡 提示: 观影日记功能可能需要特定权限或该工具不可用")
+
+    return context_lines
+
+
+def build_watchlist_brief(watchlist_payload, limit=30):
+    """保持向后兼容的包装函数"""
+    return build_brief_list(watchlist_payload, limit=limit, key_fields=["title", "slug"])
+
+
 async def call_write_tool(session, name, arguments):
+    """优化的写工具调用，统一错误处理"""
     try:
         print(f"\n🔧 正在执行: {name}")
         print(f"   参数: {arguments}")
         result = await session.call_tool(name, arguments=arguments)
         payload = parse_tool_json(result)
         
-        # 显示工具返回的详细信息
-        if isinstance(payload, dict):
-            if payload.get("success") is True:
-                print(f"✅ 操作成功: {name}")
-                return True
-            else:
-                print(f"⚠️ 操作返回异常:")
-                print(f"   {payload}")
-                return False
+        if isinstance(payload, dict) and payload.get("success") is True:
+            print(f"✅ 操作成功: {name}")
+            return True
         else:
-            print(f"⚠️ 工具返回了非预期格式: {payload}")
+            print(f"⚠️ 操作返回异常: {payload}")
             return False
-
     except Exception as e:
         error_msg = str(e)
+        return await handle_tool_error(session, name, arguments, error_msg)
+
+
+async def handle_tool_error(session, name, arguments, error_msg):
+    """统一的工具调用错误处理"""
+    if "turnstile-dialog" in error_msg.lower():
+        print(f"❌ 操作失败: {name}")
+        print("   错误类型: Letterboxd Turnstile 验证阻止")
+        print("   🔄 正在尝试重新执行...")
         
-        # 处理 Turnstile 验证错误
-        if "turnstile-dialog" in error_msg.lower():
-            print(f"❌ 操作失败: {name}")
-            print("   错误类型: Letterboxd Turnstile 验证阻止")
-            print("   🔄 正在尝试重新执行...")
-            
-            # 等待并重试
-            await asyncio.sleep(3)
-            try:
-                result = await session.call_tool(name, arguments=arguments)
-                payload = parse_tool_json(result)
-                if isinstance(payload, dict) and payload.get("success") is True:
-                    print(f"✅ 重试成功: {name}")
-                    return True
-                else:
-                    print("❌ 重试仍然失败")
-                    print("💡 建议：请手动访问 Letterboxd 网站完成验证，或稍后重试")
-                    return False
-            except Exception:
-                print("❌ 重试仍然失败") 
+        await asyncio.sleep(3)
+        try:
+            result = await session.call_tool(name, arguments=arguments)
+            payload = parse_tool_json(result)
+            if isinstance(payload, dict) and payload.get("success") is True:
+                print(f"✅ 重试成功: {name}")
+                return True
+            else:
+                print("❌ 重试仍然失败")
                 print("💡 建议：请手动访问 Letterboxd 网站完成验证，或稍后重试")
                 return False
-        else:
-            print(f"❌ 操作失败: {name}")
-            print(f"   错误详情: {error_msg}")
-            # 只显示简化的堆栈信息，不是完整的异常
-            if "Timeout" in error_msg:
-                print("💡 建议：网络超时，请检查网络连接或稍后重试")
+        except Exception:
+            print("❌ 重试仍然失败")
+            print("💡 建议：请手动访问 Letterboxd 网站完成验证，或稍后重试")
             return False
-    except Exception as err:
+    else:
         print(f"❌ 操作失败: {name}")
-        print(f"   错误详情: {str(err)}")
-        import traceback
-        print(f"   堆栈: {traceback.format_exc()}")
+        print(f"   错误详情: {error_msg}")
+        if "Timeout" in error_msg:
+            print("💡 建议：网络超时，请检查网络连接或稍后重试")
+        elif "404" in error_msg:
+            print("💡 建议：请求的资源不存在，可能是工具不可用或参数错误")
         return False
 
 
 async def interactive_post_recommendation_actions(session, recommended_films=None):
+    wants_raw = safe_input("\n要不要把推荐电影同步到你的 Letterboxd？(y/N): ")
+    if wants_raw is None:
+        return
+    wants = wants_raw.strip().lower()
+    if wants not in {"y", "yes"}:
+        return
+
     while True:
-        wants_raw = safe_input("\n要不要把推荐电影同步到你的 Letterboxd？(y/N): ")
-        if wants_raw is None:
-            return
-        wants = wants_raw.strip().lower()
-        if wants not in {"y", "yes"}:
-            return
 
         # 如果有推荐的电影列表，先显示快捷选择
         if recommended_films:
@@ -395,6 +501,9 @@ def extract_function_call(response):
         return None
     content = getattr(candidates[0], "content", None)
     parts = getattr(content, "parts", []) if content else []
+    # Ensure parts is always iterable
+    if parts is None:
+        parts = []
     for part in parts:
         call = getattr(part, "func_call", None) or getattr(part, "function_call", None)
         if call:
@@ -482,11 +591,32 @@ async def preflight_letterboxd(session, strict=False):
             raise RuntimeError(detail or "Not authenticated on Letterboxd session")
 
         # Then use a private/self-scoped endpoint to verify account-scoped reads.
-        await asyncio.wait_for(
+        watchlist_raw = await asyncio.wait_for(
             session.call_tool("get_member_watchlist", arguments={"username": "me", "maxPages": 1}),
             timeout=MCP_INIT_TIMEOUT,
         )
-        print("✅ Letterboxd 账号连通检查通过")
+        watchlist_payload = parse_tool_json(watchlist_raw)
+        connected_username = current_user.get("username") if isinstance(current_user, dict) else None
+        username_source = "session"
+        if not connected_username:
+            env_username = normalize_letterboxd_username(os.getenv("LETTERBOXD_USERNAME", ""))
+            if not env_username:
+                credentials = os.getenv("LETTERBOXD_CREDENTIALS", "")
+                if ":" in credentials:
+                    env_username = normalize_letterboxd_username(credentials.split(":", 1)[0])
+            if env_username:
+                connected_username = env_username
+                username_source = "config"
+        if connected_username:
+            suffix = "" if username_source == "session" else "，来源: 配置"
+            print(f"✅ Letterboxd 账号连通检查通过 (已连接账户: @{connected_username}{suffix})")
+        else:
+            watchlist_brief = build_brief_list(watchlist_payload, limit=3, key_fields=["title", "slug"])
+            if watchlist_brief:
+                sample = ", ".join([x.get("title", "") or x.get("slug", "") for x in watchlist_brief])
+                print(f"✅ Letterboxd 账号连通检查通过 (账户名未识别，已读取你的 watchlist 样本: {sample})")
+            else:
+                print("✅ Letterboxd 账号连通检查通过 (账户名未识别，但 me 作用域读取成功)")
         return True
     except Exception as err:
         if isinstance(err, asyncio.TimeoutError):
@@ -686,7 +816,8 @@ async def run_letterboxd_auth_check():
         return 1
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    plugin_path = os.path.join(current_dir, "Letterboxd-MCP", "index.js")
+    project_root = os.path.dirname(current_dir)  # Go up one level to project root
+    plugin_path = os.path.join(project_root, "Letterboxd-MCP", "index.js")
     external_mcp_url = os.getenv("LETTERBOXD_MCP_URL")
     mcp_url = external_mcp_url
     run_port = MCP_PORT
@@ -747,8 +878,9 @@ async def run_movie_agent(ai_provider_override=None):
     # 2. 启动 MCP Server (SSE 模式)
     # 获取当前脚本所在目录的绝对路径
     current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)  # Go up one level to project root
     # 拼接插件 index.js 的路径
-    plugin_path = os.path.join(current_dir, "Letterboxd-MCP", "index.js")
+    plugin_path = os.path.join(project_root, "Letterboxd-MCP", "index.js")
     external_mcp_url = os.getenv("LETTERBOXD_MCP_URL")
     mcp_url = external_mcp_url
     run_port = MCP_PORT
@@ -830,11 +962,11 @@ async def run_movie_agent(ai_provider_override=None):
                     try:
                         watchlist_raw = await session.call_tool(
                             "get_member_watchlist",
-                            arguments={"username": "me", "maxPages": 2},
+                            arguments={"username": "me", "maxPages": 1},
                         )
                         watchlist_payload = parse_tool_json(watchlist_raw)
-                        watchlist_pairs = build_watchlist_brief(watchlist_payload)
-                        watchlist_slug_set = slugs_from_watchlist(watchlist_payload)
+                        watchlist_pairs = build_brief_list(watchlist_payload, limit=50)
+                        watchlist_slug_set = set(item.get("slug", "") for item in watchlist_pairs if item.get("slug"))
                     except Exception as watchlist_error:
                         print(f"\n⚠️ 读取 Watchlist 失败：{watchlist_error}")
                         watchlist_pairs = []
@@ -858,18 +990,10 @@ async def run_movie_agent(ai_provider_override=None):
                     except Exception:
                         pass
 
-                    try:
-                        if not watchlist_pairs:
-                            print("   🔍 正在读取 Watchlist...")
-                            wl_raw = await session.call_tool("get_member_watchlist", arguments={"username": "me", "maxPages": 1})
-                            wl_payload = parse_tool_json(wl_raw)
-                            watchlist_pairs = build_watchlist_brief(wl_payload, limit=30)
-                        if watchlist_pairs:
-                            preview = ", ".join([f"{x.get('title','')}({x.get('slug','')})" for x in watchlist_pairs[:12]])
-                            dashscope_context_lines.append(f"用户 watchlist 样本: {preview}")
-                            print(f"   ✓ 已获取 Watchlist: {len(watchlist_pairs)} 部电影")
-                    except Exception:
-                        pass
+                    # 批量获取用户数据，限制数量防止上下文过长
+                    user_data = await get_user_context_data(session, watchlist_pairs)
+                    for context_line in user_data:
+                        dashscope_context_lines.append(context_line)
 
                     dashscope_context = "\n".join(dashscope_context_lines) if dashscope_context_lines else "无额外用户上下文"
                     print("🤖 正在生成个性化推荐...")
@@ -880,15 +1004,20 @@ async def run_movie_agent(ai_provider_override=None):
                     {dashscope_context}
 
                     你的任务：
-                    1. 根据用户心情给出 1-2 部电影推荐，并解释理由。
+                    1. 深入分析用户的心情和观影偏好，基于用户的历史数据（最爱电影、高评分电影、近期观影）给出 1-2 部精准的电影推荐。
                     2. 每部推荐都必须包含：
                        - 片名（中英文）
-                       - 时长（分钟）
-                       - 国家/地区
-                       - Letterboxd 平均评分（如果有）
+                       - 上映年份、国家/地区、时长（分钟）
+                       - Letterboxd 平均评分（格式：⭐ X.XX）
                        - slug（电影 URL 标识符，例如 lost-in-translation）
-                       - 推荐理由
-                    3. 只输出推荐结果，不要输出前置说明、免责声明或工具调用说明。
+                       - 详细推荐理由（至少120字）：
+                         * 电影的核心主题和情感特质
+                         * 导演风格和表现手法
+                         * 为什么符合用户当前心情
+                         * 如何与用户历史观影偏好匹配
+                         * 具体的情感体验和观影感受描述
+                    3. 推荐理由要原创且具体，避免套话，要真正体现电影的独特之处和与用户偏好的契合度。
+                    4. 只输出推荐结果，不要输出前置说明、免责声明或工具调用说明。
 
                     输出格式示例：
                     《迷失东京》Lost in Translation (2003, 美国/日本, 102分钟, ⭐ 3.76)
