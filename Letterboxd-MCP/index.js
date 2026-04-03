@@ -32,20 +32,35 @@ const server = new Server(
   }
 );
 
-function normalizeUsername(value) {
+function toLetterboxdSlug(value) {
   if (value === undefined || value === null) return '';
   let raw = String(value).trim();
-  if (!raw) return client.username || process.env.LETTERBOXD_USERNAME || '';
-  if (raw.toLowerCase() === 'me' || raw.toLowerCase() === 'self') {
-    return client.username || process.env.LETTERBOXD_USERNAME || '';
-  }
+  if (!raw) return '';
+  if (raw.startsWith('@')) raw = raw.slice(1);
+
   try {
-    if (raw.startsWith('http')) {
-      const parts = new URL(raw).pathname.split('/').filter(Boolean);
-      return parts[0];
+    const parsed = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+    if (parsed.hostname && /(^|\.)letterboxd\.com$/i.test(parsed.hostname)) {
+      raw = parsed.pathname;
     }
   } catch {}
-  return raw.split('/').filter(Boolean)[0];
+
+  raw = raw.split('?')[0].split('#')[0];
+  const parts = raw.split('/').map((part) => part.trim()).filter(Boolean);
+  const blocked = new Set(['sign-in', 'signin', 'user', 'film', 'films', 'watchlist', 'diary', 'lists', 'member']);
+  const candidate = parts.length ? parts[0].replace(/^@+/, '') : raw.replace(/^@+/, '');
+  return /^[a-z0-9][a-z0-9_-]{1,40}$/i.test(candidate) && !blocked.has(candidate.toLowerCase())
+    ? candidate
+    : '';
+}
+
+function normalizeUsername(value) {
+  if (value === undefined || value === null) return '';
+  const raw = String(value).trim();
+  if (!raw || raw.toLowerCase() === 'me' || raw.toLowerCase() === 'self') {
+    return toLetterboxdSlug(client.username) || toLetterboxdSlug(process.env.LETTERBOXD_USERNAME) || '';
+  }
+  return toLetterboxdSlug(raw);
 }
 
 async function collectPaged(fetchPage, options) {
@@ -146,6 +161,14 @@ const tools = [
     },
   },
   {
+    name: 'get_member_snapshot',
+    description: 'Get a single cached profile snapshot for taste profiling: favourites, watchlist, recent activity, and best-effort ratings.',
+    inputSchema: {
+      type: 'object',
+      properties: { username: { type: 'string', default: 'me' } },
+    },
+  },
+  {
     name: 'add_to_watched',
     description: 'Mark film as watched.',
     inputSchema: {
@@ -198,6 +221,14 @@ const tools = [
     },
   },
   {
+    name: 'get_member_ratings',
+    description: 'Get films rated by a user (sorted by rating), useful for taste profiling.',
+    inputSchema: {
+      type: 'object',
+      properties: { username: { type: 'string', default: 'me' }, maxPages: { type: 'integer', minimum: 1 } },
+    },
+  },
+  {
     name: 'get_member_lists',
     description: 'Get user lists.',
     inputSchema: {
@@ -238,7 +269,9 @@ const toolHandlers = {
   get_member_watchlist: async (args) => collectPaged(({ cursor }) => client.getMemberWatchlist(normalizeUsername(args.username), { cursor }), args),
   get_member_diary: async (args) => collectPaged(({ cursor }) => client.getMemberDiary(normalizeUsername(args.username), { cursor }), args),
   get_member_films: async (args) => collectPaged(({ cursor }) => client.getMemberFilms(normalizeUsername(args.username), { cursor }), args),
+  get_member_ratings: async (args) => collectPaged(({ cursor }) => client.getMemberRatings(normalizeUsername(args.username), { cursor }), args),
   get_member_pinned: async (args) => client.getMemberPinned(normalizeUsername(args.username)),
+  get_member_snapshot: async (args) => client.getMemberSnapshot(normalizeUsername(args.username)),
   add_to_watched: async (args) => ({ success: await client.addToWatched(args.slug, args.remove) }),
   add_to_watchlist: async (args) => ({ success: await client.addToWatchlist(args.slug, args.remove) }),
   write_review: async (args) => ({ success: await client.writeReview(args.slug, args) }),

@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { chromium } = require('playwright');
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
@@ -16,6 +17,15 @@ const DEFAULT_HTTP_TIMEOUT_MS = envInt(process.env.LETTERBOXD_HTTP_TIMEOUT_MS, 2
 const MAX_REDIRECTS = envInt(process.env.LETTERBOXD_MAX_REDIRECTS, 5);
 const LOGIN_WAIT_MS = envInt(process.env.LETTERBOXD_LOGIN_WAIT_MS, 20000);
 const INTERACTIVE_LOGIN_WAIT_MS = envInt(process.env.LETTERBOXD_INTERACTIVE_LOGIN_WAIT_MS, 45000);
+const READ_THROTTLE_MS = envInt(process.env.LETTERBOXD_READ_THROTTLE_MS, 900);
+const BROWSER_PREFERENCE_MS = envInt(process.env.LETTERBOXD_BROWSER_PREFERENCE_MS, 120000);
+const PROFILE_SNAPSHOT_TTL_MS = envInt(process.env.LETTERBOXD_PROFILE_SNAPSHOT_TTL_MS, 90000);
+const PROFILE_SNAPSHOT_CACHE_FILE =
+  process.env.LETTERBOXD_PROFILE_SNAPSHOT_CACHE_FILE ||
+  path.join(os.homedir(), '.movie-rec-letterboxd', 'profile-snapshots.json');
+const PROFILE_HTML_FALLBACK_DIR =
+  process.env.LETTERBOXD_PROFILE_HTML_FALLBACK_DIR ||
+  os.tmpdir();
 const BROWSER_CHANNEL = process.env.LETTERBOXD_BROWSER_CHANNEL || 'chrome';
 const BROWSER_USER_DATA_DIR =
   process.env.LETTERBOXD_BROWSER_USER_DATA_DIR ||
@@ -24,6 +34,7 @@ const LOGIN_STRATEGY = (process.env.LETTERBOXD_LOGIN_STRATEGY || 'auto').toLower
 const BLOCK_AD_REQUESTS = process.env.LETTERBOXD_BLOCK_AD_REQUESTS !== 'false';
 const STEALTH_MODE = process.env.LETTERBOXD_STEALTH !== 'false';
 const MANUAL_PREFILL_CREDENTIALS = process.env.LETTERBOXD_MANUAL_PREFILL_CREDENTIALS !== 'false';
+const IS_LINUX = process.platform === 'linux';
 
 const AD_HOST_PATTERNS = [
   /(^|\.)rubiconproject\.com$/i,
@@ -75,6 +86,28 @@ function cleanJsonLd(raw) {
   }
 }
 
+function normalizeLetterboxdSlug(value) {
+  if (value === undefined || value === null) return '';
+  let raw = String(value).trim();
+  if (!raw) return '';
+  if (raw.startsWith('@')) raw = raw.slice(1);
+
+  try {
+    const parsed = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+    if (parsed.hostname && /(^|\.)letterboxd\.com$/i.test(parsed.hostname)) {
+      raw = parsed.pathname;
+    }
+  } catch {}
+
+  raw = raw.split('?')[0].split('#')[0];
+  const parts = raw.split('/').map((part) => part.trim()).filter(Boolean);
+  const blocked = new Set(['sign-in', 'signin', 'user', 'film', 'films', 'watchlist', 'diary', 'lists', 'member']);
+  const candidate = parts.length ? parts[0].replace(/^@+/, '') : raw.replace(/^@+/, '');
+  return /^[a-z0-9][a-z0-9_-]{1,40}$/i.test(candidate) && !blocked.has(candidate.toLowerCase())
+    ? candidate
+    : '';
+}
+
 class LetterboxdClient {
   constructor(options = {}) {
     this.baseUrl = options.baseUrl || 'https://letterboxd.com';
@@ -96,6 +129,9 @@ class LetterboxdClient {
     this.browser = null;
     this.browserContext = null;
     this.routeConfigured = false;
+    this.lastReadAt = 0;
+    this.preferBrowserUntil = 0;
+    this.profileSnapshotCache = new Map();
     if (typeof options.browserHeadless === 'boolean') {
       this.browserHeadless = options.browserHeadless;
     } else if (process.env.LETTERBOXD_HEADLESS !== undefined) {
@@ -123,6 +159,12 @@ class LetterboxdClient {
   }
 
   _extractUserSlugFromCookies() {
+    // letterboxd.signed.in.as contains the plain slug directly
+    const signedInAs = this.cookies['letterboxd.signed.in.as'];
+    if (signedInAs && /^[a-z0-9][a-z0-9_-]{1,40}$/i.test(signedInAs)) {
+      return signedInAs;
+    }
+
     const candidates = [
       this.cookies['letterboxd.user.CURRENT'],
       this.cookies['persona'],
@@ -166,6 +208,34 @@ class LetterboxdClient {
     }
 
     return '';
+  }
+
+  async _resolveMemberUsername(username) {
+    const raw = String(username || '').trim();
+    if (raw && raw.toLowerCase() !== 'me' && raw.toLowerCase() !== 'self') {
+      return normalizeLetterboxdSlug(raw);
+    }
+
+    const currentSlug = normalizeLetterboxdSlug(this.username);
+    if (currentSlug) {
+      this.username = currentSlug;
+      return currentSlug;
+    }
+
+    const cookieSlug = this._extractUserSlugFromCookies();
+    if (cookieSlug) {
+      this.username = normalizeLetterboxdSlug(cookieSlug) || cookieSlug;
+      return cookieSlug;
+    }
+
+    await this.refreshLoginState().catch(() => {});
+    const refreshedSlug = normalizeLetterboxdSlug(this.username);
+    if (refreshedSlug) {
+      this.username = refreshedSlug;
+      return refreshedSlug;
+    }
+
+    return normalizeLetterboxdSlug(process.env.LETTERBOXD_USERNAME || '');
   }
 
   _extractFilmIdFromHtml(html, slug = '') {
@@ -281,9 +351,7 @@ class LetterboxdClient {
         delete this.cookies[name];
       }
     }
-    this.cookieHeader = Object.entries(this.cookies)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('; ');
+    this._rebuildCookieHeader();
   }
 
   _storeCookieHeaderString(cookieHeaderString) {
@@ -303,9 +371,22 @@ class LetterboxdClient {
       else delete this.cookies[name];
     }
 
+    this._rebuildCookieHeader();
+  }
+
+  _rebuildCookieHeader() {
     this.cookieHeader = Object.entries(this.cookies)
       .map(([key, value]) => `${key}=${value}`)
       .join('; ');
+  }
+
+  async _syncCookiesFromBrowserContext() {
+    if (!this.browserContext) return;
+    const browserCookies = await this.browserContext.cookies();
+    for (const cookie of browserCookies) {
+      this.cookies[cookie.name] = cookie.value;
+    }
+    this._rebuildCookieHeader();
   }
 
   async _request(method, url, options = {}) {
@@ -363,36 +444,228 @@ class LetterboxdClient {
     throw new Error('Too many redirects.');
   }
 
+  _isCloudflareChallenge(html) {
+    if (typeof html !== 'string') return false;
+    return (
+      html.includes('challenge-platform') ||
+      html.includes('cf_chl_opt') ||
+      html.includes('Just a moment') ||
+      html.includes('Enable JavaScript and cookies to continue') ||
+      // Cloudflare error pages (520, 521, 522, 524) — report as challenge so caller falls back to browser
+      (html.includes('id="cf-error-details"') && html.includes('error-details')) ||
+      (html.includes('Web server is returning an unknown error') && html.includes('cf-wrapper'))
+    );
+  }
+
+  async _throttleReadRequests(options = {}) {
+    if (options.skipThrottle || READ_THROTTLE_MS <= 0) return;
+    const now = Date.now();
+    const waitMs = this.lastReadAt + READ_THROTTLE_MS - now;
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+    this.lastReadAt = Date.now();
+  }
+
+  _preferBrowser(reason = '') {
+    this.preferBrowserUntil = Date.now() + BROWSER_PREFERENCE_MS;
+    if (reason) {
+      console.error(`[Letterboxd] Prefer browser reads for ${Math.round(BROWSER_PREFERENCE_MS / 1000)}s: ${reason}`);
+    }
+  }
+
+  _shouldPreferBrowser(options = {}) {
+    if (options.forceHttp) return false;
+    if (options.forceBrowser) return true;
+    return Date.now() < this.preferBrowserUntil;
+  }
+
+  _getProfileSnapshotCache(username) {
+    const cached = this.profileSnapshotCache.get(username);
+    if (!cached) return null;
+    if (cached.expiresAt <= Date.now()) {
+      this.profileSnapshotCache.delete(username);
+      return null;
+    }
+    return cached.data;
+  }
+
+  _setProfileSnapshotCache(username, data) {
+    this.profileSnapshotCache.set(username, {
+      data,
+      expiresAt: Date.now() + PROFILE_SNAPSHOT_TTL_MS,
+    });
+  }
+
+  _readProfileSnapshotDiskCache(username) {
+    try {
+      if (!fs.existsSync(PROFILE_SNAPSHOT_CACHE_FILE)) return null;
+      const raw = fs.readFileSync(PROFILE_SNAPSHOT_CACHE_FILE, 'utf8');
+      const parsed = JSON.parse(raw || '{}');
+      const entry = parsed[username];
+      if (!entry || !entry.data) return null;
+      return entry;
+    } catch {
+      return null;
+    }
+  }
+
+  _writeProfileSnapshotDiskCache(username, data, source = 'live') {
+    try {
+      fs.mkdirSync(path.dirname(PROFILE_SNAPSHOT_CACHE_FILE), { recursive: true });
+      let parsed = {};
+      if (fs.existsSync(PROFILE_SNAPSHOT_CACHE_FILE)) {
+        try {
+          parsed = JSON.parse(fs.readFileSync(PROFILE_SNAPSHOT_CACHE_FILE, 'utf8') || '{}');
+        } catch {
+          parsed = {};
+        }
+      }
+      parsed[username] = {
+        savedAt: new Date().toISOString(),
+        source,
+        data,
+      };
+      fs.writeFileSync(PROFILE_SNAPSHOT_CACHE_FILE, JSON.stringify(parsed, null, 2), 'utf8');
+    } catch {}
+  }
+
+  _readLocalProfileHtml(username) {
+    const candidates = [];
+    const envPath = process.env.LETTERBOXD_PROFILE_HTML_FALLBACK || '';
+    if (envPath) candidates.push(envPath);
+    candidates.push(path.join(PROFILE_HTML_FALLBACK_DIR, `${username}_public.html`));
+
+    for (const filePath of candidates) {
+      try {
+        if (filePath && fs.existsSync(filePath)) {
+          const html = fs.readFileSync(filePath, 'utf8');
+          if (html && !this._isCloudflareChallenge(html)) {
+            return { html, filePath };
+          }
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  _buildSnapshotFromProfileHtml(html, username, source = 'saved-html') {
+    const $ = cheerio.load(html);
+    const favourites = this._extractPosterItems($, $('#favourites').first()).slice(0, 8);
+    const watchlistSection = $('section.watchlist-aside, .watchlist-aside, section').filter((i, el) => {
+      const heading = $(el).find('h2 a, .section-heading a').first().attr('href') || '';
+      return heading.includes(`/${username}/watchlist/`);
+    }).first();
+    const watchlist = this._extractPosterItems($, watchlistSection.length ? watchlistSection : $.root()).slice(0, 12);
+    const recent = this._extractHomeActivity($).slice(0, 12);
+    const ratings = recent.filter((item) => item.rating).slice(0, 12);
+    const diary = recent.slice(0, 8);
+
+    return {
+      username,
+      favourites,
+      watchlist,
+      recent,
+      ratings,
+      diary,
+      warnings: [],
+      source,
+    };
+  }
+
   async fetchHtml(url, options = {}) {
     if (this.loginForReads && !options.skipLogin && !this.isLoggedIn) {
       await this.ensureLoggedIn();
     }
+
+    await this._throttleReadRequests(options);
+
+    if (this._shouldPreferBrowser(options)) {
+      return this.fetchHtmlWithBrowser(url, options);
+    }
+
     const response = await this._request('GET', url);
     if (response.status >= 400) {
-      if (response.status === 403 || response.status === 429) {
-        return this.fetchHtmlWithBrowser(url);
+      // 403 = auth block, 429 = rate-limit, 5xx = Cloudflare/server errors — all fall back to browser
+      if (response.status === 403 || response.status === 429 || response.status >= 500) {
+        this._preferBrowser(`HTTP ${response.status} for ${url}`);
+        return this.fetchHtmlWithBrowser(url, options);
       }
       throw new Error(`Request failed with status ${response.status}`);
     }
-    if (typeof response.data === 'string') return response.data;
-    return JSON.stringify(response.data || '');
+    const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data || '');
+    // Cloudflare returns HTTP 200 for its JS challenge page — detect and fall back to browser
+    if (this._isCloudflareChallenge(html)) {
+      this._preferBrowser(`challenge page for ${url}`);
+      return this.fetchHtmlWithBrowser(url, options);
+    }
+    return html;
   }
 
-  async fetchHtmlWithBrowser(url) {
+  async fetchPublicHtml(url) {
+    const response = await axios({
+      method: 'GET',
+      url,
+      timeout: this.httpTimeoutMs,
+      maxRedirects: MAX_REDIRECTS,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent': this.userAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    if (response.status >= 400) {
+      throw new Error(`Public request failed with status ${response.status}`);
+    }
+
+    const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data || '');
+    if (this._isCloudflareChallenge(html)) {
+      throw new Error(`Public fetch hit Cloudflare challenge for ${url}`);
+    }
+    return html;
+  }
+
+  async fetchHtmlWithBrowser(url, options = {}) {
     await this._ensureBrowser();
     const page = await this.browserContext.newPage();
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(800);
-      const html = await page.content();
+      await this._throttleReadRequests({ ...options, skipThrottle: options.skipBrowserThrottle });
+      await page.goto(this.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-      const newCookies = await this.browserContext.cookies();
-      for (const cookie of newCookies) {
-        this.cookies[cookie.name] = cookie.value;
+      let html = '';
+      const deadline = Date.now() + 40000;
+      while (Date.now() < deadline) {
+        await page.waitForLoadState('networkidle', { timeout: 2500 }).catch(() => {});
+        await page.waitForTimeout(1200);
+        html = await page.content();
+        if (!this._isCloudflareChallenge(html)) {
+          break;
+        }
       }
-      this.cookieHeader = Object.entries(this.cookies)
-        .map(([key, value]) => `${key}=${value}`)
-        .join('; ');
+
+      if (this._isCloudflareChallenge(html) && !this.browserHeadless && INTERACTIVE_LOGIN_WAIT_MS > 0) {
+        console.error(`[Letterboxd] Waiting up to ${Math.round(INTERACTIVE_LOGIN_WAIT_MS / 1000)}s for manual security verification on ${url}`);
+        const interactiveDeadline = Date.now() + INTERACTIVE_LOGIN_WAIT_MS;
+        while (Date.now() < interactiveDeadline) {
+          await page.waitForLoadState('networkidle', { timeout: 2500 }).catch(() => {});
+          await page.waitForTimeout(1500);
+          html = await page.content();
+          if (!this._isCloudflareChallenge(html)) {
+            break;
+          }
+        }
+      }
+
+      if (this._isCloudflareChallenge(html)) {
+        this._preferBrowser(`challenge persisted for ${url}`);
+        throw new Error(`Cloudflare challenge not cleared for ${url}`);
+      }
+
+      this._preferBrowser(`browser-cleared session for ${url}`);
+      await this._syncCookiesFromBrowserContext();
 
       return html;
     } finally {
@@ -416,11 +689,14 @@ class LetterboxdClient {
     const items = [];
     const seen = new Set();
     scope
-      .find('.poster-grid .griditem, .poster-container, .poster-list .posteritem, .film-poster')
+      .find('.poster-grid .griditem, .poster-container, .poster-list .posteritem, .film-poster, .favourite-production-poster-container, .viewing-poster-container, .js-production-viewing, .production-poster-container, .react-component.figure, [data-component-class="LazyPoster"]')
       .each((i, el) => {
         const node = $(el);
         const poster = node.hasClass('film-poster') ? node : node.find('.film-poster').first();
+        const figure = node.find('[data-item-slug], [data-film-slug], [data-item-link], [data-target-link]').first();
         const dataName =
+          figure.attr('data-item-name') ||
+          figure.attr('data-film-name') ||
           poster.attr('data-film-name') ||
           poster.attr('data-item-name') ||
           node.find('[data-film-name]').attr('data-film-name') ||
@@ -435,6 +711,8 @@ class LetterboxdClient {
         const title = (dataName || imgAlt || '').replace(/^Poster for /, '').trim();
 
         const slugFromData =
+          figure.attr('data-item-slug') ||
+          figure.attr('data-film-slug') ||
           node.attr('data-film-slug') ||
           node.attr('data-item-slug') ||
           poster.attr('data-film-slug') ||
@@ -443,6 +721,8 @@ class LetterboxdClient {
           node.find('[data-item-slug]').attr('data-item-slug') ||
           '';
         const link =
+          figure.attr('data-item-link') ||
+          figure.attr('data-target-link') ||
           node.find('a[href*="/film/"]').first().attr('href') ||
           poster.find('a[href*="/film/"]').first().attr('href') ||
           '';
@@ -477,8 +757,172 @@ class LetterboxdClient {
     return items;
   }
 
-  async fetchPage(url, scraperFunc, limit) {
+  _extractHomeActivity($) {
+    const items = [];
+    const seen = new Set();
+
+    $('.viewing-poster-container, .js-production-viewing').each((i, el) => {
+      const node = $(el);
+      const figure = node.find('[data-item-slug], [data-film-slug], [data-item-link], [data-target-link]').first();
+      const slug =
+        figure.attr('data-item-slug') ||
+        figure.attr('data-film-slug') ||
+        figure.attr('data-item-link')?.split('/').filter(Boolean).slice(-1)[0] ||
+        figure.attr('data-target-link')?.split('/').filter(Boolean).slice(-1)[0] ||
+        node.find('a[href*="/film/"]').first().attr('href')?.split('/').filter(Boolean).slice(-1)[0] ||
+        '';
+      if (!slug || seen.has(slug)) return;
+
+      const title =
+        (figure.attr('data-item-name') || '').replace(/\s*\(\d{4}\)\s*$/, '') ||
+        node.find('.primaryname a').first().text().trim() ||
+        node.find('img').attr('alt') ||
+        slug.replace(/-/g, ' ');
+      const rating =
+        node.find('svg[aria-label]').first().attr('aria-label') ||
+        node.find('.rating').first().text().trim() ||
+        '';
+      const date =
+        node.find('time[datetime], time.timestamp').first().attr('datetime') ||
+        node.find('time[datetime], time.timestamp').first().text().trim() ||
+        '';
+
+      seen.add(slug);
+      items.push({ title, slug, rating, date });
+    });
+
+    return items;
+  }
+
+  async _getProfileHomeData(username) {
+    const resolvedUsername = await this._resolveMemberUsername(username);
+    const cached = this._getProfileSnapshotCache(resolvedUsername);
+    if (cached) return cached;
+
+    const url = `${this.baseUrl}/${resolvedUsername}/`;
+    // Use authenticated fetchHtml (with cookie + browser fallback) instead of fetchPublicHtml
+    // so Cloudflare challenges are handled via the logged-in browser session.
     const html = await this.fetchHtml(url);
+    const $ = cheerio.load(html);
+    const favourites = this._extractPosterItems($, $('#favourites').first());
+    const watchlistSection = $('section.watchlist-aside, .watchlist-aside, section').filter((i, el) => {
+      const heading = $(el).find('h2 a, .section-heading a').first().attr('href') || '';
+      return heading.includes(`/${resolvedUsername}/watchlist/`);
+    }).first();
+    const watchlist = this._extractPosterItems($, watchlistSection.length ? watchlistSection : $.root());
+    const recent = this._extractHomeActivity($);
+
+    const data = { favourites, watchlist, recent };
+    this._setProfileSnapshotCache(resolvedUsername, data);
+    return data;
+  }
+
+  async getMemberSnapshot(username) {
+    const warnings = [];
+    const resolvedUsername = await this._resolveMemberUsername(username);
+    let favourites = [];
+    let watchlist = [];
+    let recent = [];
+    let ratings = [];
+    let diary = [];
+
+    try {
+      const home = await this._getProfileHomeData(resolvedUsername);
+      favourites = home.favourites.slice(0, 8);
+      watchlist = home.watchlist.slice(0, 12);
+      recent = home.recent.slice(0, 12);
+      ratings = home.recent.filter((item) => item.rating).slice(0, 12);
+      diary = home.recent.slice(0, 8);
+      if (!favourites.length && !watchlist.length && !recent.length) {
+        warnings.push('Profile home page returned no parsable activity; Cloudflare may still be limiting some sections.');
+      }
+    } catch (err) {
+      warnings.push(`Profile home snapshot unavailable: ${String(err || '')}`);
+    }
+
+    if (!watchlist.length) {
+      try {
+        const page = await this.getMemberWatchlist(resolvedUsername, { limit: 12, allowHomeFallback: false, forceHttp: true });
+        watchlist = (page.items || []).slice(0, 12);
+      } catch (err) {
+        warnings.push(`Could not read watchlist page: ${String(err || '')}`);
+      }
+    }
+
+    if (!recent.length) {
+      try {
+        const page = await this.getMemberFilms(resolvedUsername, { limit: 12, allowHomeFallback: false, forceHttp: true });
+        recent = (page.items || []).slice(0, 12);
+      } catch (err) {
+        warnings.push(`Could not read films page: ${String(err || '')}`);
+      }
+    }
+
+    if (!ratings.length) {
+      try {
+        const page = await this.getMemberRatings(resolvedUsername, { limit: 12, allowHomeFallback: false, forceHttp: true });
+        ratings = (page.items || []).slice(0, 12);
+      } catch (err) {
+        warnings.push(`Could not expand ratings page: ${String(err || '')}`);
+      }
+    }
+
+    if (!diary.length) {
+      try {
+        const page = await this.getMemberDiary(resolvedUsername, { limit: 8, allowHomeFallback: false, forceHttp: true });
+        diary = (page.items || []).slice(0, 8);
+      } catch (err) {
+        warnings.push(`Could not read diary page: ${String(err || '')}`);
+      }
+    }
+
+    const snapshot = {
+      username: resolvedUsername,
+      favourites,
+      watchlist,
+      recent,
+      ratings,
+      diary,
+      warnings,
+      source: 'profile-home-snapshot',
+    };
+
+    const hasData = !!(favourites.length || watchlist.length || recent.length || ratings.length || diary.length);
+    if (hasData) {
+      this._setProfileSnapshotCache(resolvedUsername, snapshot);
+      this._writeProfileSnapshotDiskCache(resolvedUsername, snapshot, 'live');
+      return snapshot;
+    }
+
+    const localHtml = this._readLocalProfileHtml(resolvedUsername);
+    if (localHtml) {
+      const htmlSnapshot = this._buildSnapshotFromProfileHtml(localHtml.html, resolvedUsername, `saved-html:${localHtml.filePath}`);
+      htmlSnapshot.warnings.push(...warnings, `Using saved profile HTML fallback from ${localHtml.filePath} because live profile routes failed.`);
+      this._setProfileSnapshotCache(resolvedUsername, htmlSnapshot);
+      this._writeProfileSnapshotDiskCache(resolvedUsername, htmlSnapshot, 'saved-html');
+      return htmlSnapshot;
+    }
+
+    const diskEntry = this._readProfileSnapshotDiskCache(resolvedUsername);
+    if (diskEntry && diskEntry.data) {
+      const cachedSnapshot = {
+        ...diskEntry.data,
+        warnings: [
+          ...warnings,
+          `Using cached snapshot saved at ${diskEntry.savedAt} (${diskEntry.source || 'unknown source'}) because live profile routes failed.`,
+        ],
+        source: 'cached-profile-snapshot',
+      };
+      this._setProfileSnapshotCache(resolvedUsername, cachedSnapshot);
+      return cachedSnapshot;
+    }
+
+    return snapshot;
+  }
+
+  async fetchPage(url, scraperFunc, options = {}) {
+    const fetchOptions = typeof options === 'number' ? {} : (options || {});
+    const html = await this.fetchHtml(url, fetchOptions);
     const $ = cheerio.load(html);
     let items = scraperFunc($);
     const nextLink =
@@ -507,7 +951,7 @@ class LetterboxdClient {
   }
 
   async login(username, password) {
-    this.username = username;
+    this.username = normalizeLetterboxdSlug(username) || username;
     await this.refreshLoginState();
 
     const tryBrowserLoginWithRetry = async () => {
@@ -572,8 +1016,9 @@ class LetterboxdClient {
     }
 
     // Keep best-effort slug normalization after successful login.
-    if (this.isLoggedIn && username && !username.includes('@')) {
-      this.username = username;
+    const inputSlug = normalizeLetterboxdSlug(username);
+    if (this.isLoggedIn && inputSlug) {
+      this.username = inputSlug;
     }
     if (this.isLoggedIn) {
       await this.refreshLoginState();
@@ -753,9 +1198,7 @@ class LetterboxdClient {
           for (const cookie of liveCookies) {
             this.cookies[cookie.name] = cookie.value;
           }
-          this.cookieHeader = Object.entries(this.cookies)
-            .map(([key, value]) => `${key}=${value}`)
-            .join('; ');
+          this._rebuildCookieHeader();
 
           ({ browserLoggedIn, meSlug, urlSlug, blockedPaths } = await readBrowserAuthState());
           
@@ -774,14 +1217,8 @@ class LetterboxdClient {
         }
       }
 
-      const browserCookies = await this.browserContext.cookies();
-      console.error(`[Letterboxd] Collected ${browserCookies.length} cookies from browser`);
-      for (const cookie of browserCookies) {
-        this.cookies[cookie.name] = cookie.value;
-      }
-      this.cookieHeader = Object.entries(this.cookies)
-        .map(([key, value]) => `${key}=${value}`)
-        .join('; ');
+      await this._syncCookiesFromBrowserContext();
+      console.error(`[Letterboxd] Collected ${Object.keys(this.cookies).length} cookies from browser`);
       
       const hasSessionCookie = this.cookies['letterboxd.session'] || false;
       const hasPersonaCookie = this.cookies['persona'] || false;
@@ -811,20 +1248,26 @@ class LetterboxdClient {
   async ensureLoggedIn() {
     if (this.isLoggedIn) {
       if (!this.username || this.username.includes('@')) {
-        let envUser = process.env.LETTERBOXD_USERNAME;
+        const envUser = normalizeLetterboxdSlug(process.env.LETTERBOXD_USERNAME);
         try {
-          const homeHtml = await this.fetchHtml(this.baseUrl, { skipLogin: true });
-          const $home = cheerio.load(homeHtml);
-          const userSlug = $home('body').attr('data-user-name') || 
-                           $home('.nav-account a').attr('href')?.split('/').filter(Boolean).pop() ||
-                           $home('.nav-main-right .nav-account > a').attr('href')?.split('/').filter(Boolean).pop();
-          if (userSlug) {
-            this.username = userSlug;
-          } else if (envUser && !envUser.includes('@')) {
+          const response = await this._request('GET', this.baseUrl, { skipLogin: true });
+          const homeHtml = typeof response.data === 'string' ? response.data : '';
+          if (!this._isCloudflareChallenge(homeHtml)) {
+            const $home = cheerio.load(homeHtml);
+            const userSlug = $home('body').attr('data-user-name') || 
+                             $home('.nav-account a').attr('href')?.split('/').filter(Boolean).pop() ||
+                             $home('.nav-main-right .nav-account > a').attr('href')?.split('/').filter(Boolean).pop();
+            const normalizedUserSlug = normalizeLetterboxdSlug(userSlug);
+            if (normalizedUserSlug) {
+              this.username = normalizedUserSlug;
+            } else if (envUser) {
+              this.username = envUser;
+            }
+          } else if (envUser) {
             this.username = envUser;
           }
         } catch (e) {
-          if (envUser && !envUser.includes('@')) this.username = envUser;
+          if (envUser) this.username = envUser;
         }
       }
       return;
@@ -865,13 +1308,13 @@ class LetterboxdClient {
     }
 
     // Priority 2: Try username/password login only if cookies not available
-    let username = process.env.LETTERBOXD_USERNAME;
+    let username = normalizeLetterboxdSlug(process.env.LETTERBOXD_USERNAME);
     let password = process.env.LETTERBOXD_PASSWORD;
     
     if ((!username || !password) && process.env.LETTERBOXD_CREDENTIALS) {
       const [user, ...rest] = process.env.LETTERBOXD_CREDENTIALS.split(':');
       if (user && rest.length) {
-        username = user;
+        username = normalizeLetterboxdSlug(user);
         password = rest.join(':');
       }
     }
@@ -889,32 +1332,143 @@ class LetterboxdClient {
     return this.loginPromise;
   }
 
+  async _searchViaSlugEstimation(query) {
+    // Build candidate slugs from the query title without touching any CF-protected endpoint.
+    // Works well for the vast majority of English-title films (the common recommendation case).
+    const normalize = (t) =>
+      t
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')   // strip diacritics
+        .replace(/[^a-z0-9\s]/g, ' ')      // non-alphanumeric → space
+        .replace(/\s+/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+    // Strip a trailing year "(2019)" from the query to get the base title
+    const yearMatch = query.match(/\((\d{4})\)\s*$/);
+    const yearStr = yearMatch ? yearMatch[1] : '';
+    const baseTitle = yearStr ? query.replace(/\s*\(\d{4}\)\s*$/, '').trim() : query;
+
+    const candidates = [normalize(baseTitle)];
+    if (yearStr) candidates.push(`${normalize(baseTitle)}-${yearStr}`);
+
+    for (const slug of candidates) {
+      if (!slug) continue;
+      try {
+        const film = await this.getFilm(slug);
+        // Validate we got a real film, not a CF error page or empty skeleton
+        if (film && film.title && (film.year || film.director || film.rating)) {
+          return [{ title: film.title, slug, url: `${this.baseUrl}/film/${slug}/`, year: film.year || '' }];
+        }
+      } catch {
+        // Slug didn't resolve — try next candidate
+      }
+    }
+    return [];
+  }
+
   async search(query, type = 'films', options = {}) {
+    // ── Strategy 1: Slug estimation (no scraping, CF-immune) ──────────────────
+    // Skip for paginated queries or non-film searches where a slug isn't meaningful.
+    if (type === 'films' && !options.cursor) {
+      try {
+        const estimated = await this._searchViaSlugEstimation(query);
+        if (estimated.length) {
+          return { items: estimated, nextCursor: null };
+        }
+      } catch {
+        // estimation failed — continue to scraping strategies
+      }
+    }
+
+    // ── Strategy 2: Letterboxd search page (HTML scraping) ───────────────────
     const url = this.resolveCursor(
       options.cursor,
       `${this.baseUrl}/search/${type}/${encodeURIComponent(query)}/`
     );
-    const { items, nextCursor } = await this.fetchPage(
-      url,
-      ($) => {
-        const results = [];
-        $('.results li').each((i, el) => {
-          const titleElement = $(el).find('.film-title-wrapper a, .name a').first();
-          const title = titleElement.text().trim() || $(el).find('.name').text().trim();
-          const link = titleElement.attr('href') || $(el).find('a').attr('href');
-          if (title && link) {
-            results.push({
-              title,
-              url: `${this.baseUrl}${link}`,
-              slug: link.split('/').filter(Boolean).pop(),
-            });
-          }
-        });
-        return results;
+    try {
+      const { items, nextCursor } = await this.fetchPage(
+        url,
+        ($) => {
+          const results = [];
+          $('.results li').each((i, el) => {
+            const titleElement = $(el).find('.film-title-wrapper a, .name a').first();
+            const title = titleElement.text().trim() || $(el).find('.name').text().trim();
+            const link = titleElement.attr('href') || $(el).find('a').attr('href');
+            if (title && link) {
+              results.push({
+                title,
+                url: `${this.baseUrl}${link}`,
+                slug: link.split('/').filter(Boolean).pop(),
+              });
+            }
+          });
+          return results;
+        },
+        options.limit
+      );
+      if (items.length) {
+        return { items, nextCursor };
+      }
+    } catch (err) {
+      if (!String(err || '').includes('Cloudflare challenge')) {
+        throw err;
+      }
+    }
+
+    const items = await this._searchViaDuckDuckGo(query, type);
+    return { items, nextCursor: null };
+  }
+
+  async _searchViaDuckDuckGo(query, type = 'films') {
+    if (type !== 'films') return [];
+
+    const response = await axios({
+      method: 'GET',
+      url: 'https://duckduckgo.com/html/',
+      params: { q: `site:letterboxd.com/film/ ${query}` },
+      timeout: this.httpTimeoutMs,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent': this.userAgent,
+        'Accept-Language': 'en-US,en;q=0.9',
       },
-      options.limit
-    );
-    return { items, nextCursor };
+    });
+
+    if (response.status >= 400) {
+      return [];
+    }
+
+    const $ = cheerio.load(typeof response.data === 'string' ? response.data : '');
+    const items = [];
+    const seen = new Set();
+    $('a.result__a, a[data-testid="result-title-a"], a[href*="letterboxd.com/film/"]').each((i, el) => {
+      const href = $(el).attr('href') || '';
+      const resolvedHref = (() => {
+        try {
+          if (href.includes('uddg=')) {
+            return decodeURIComponent(href.split('uddg=').pop().split('&')[0]);
+          }
+        } catch {}
+        return href;
+      })();
+
+      const match = resolvedHref.match(/https?:\/\/letterboxd\.com\/film\/([^/?#]+)\/?/i);
+      if (!match) return;
+
+      const slug = match[1];
+      if (!slug || seen.has(slug)) return;
+      seen.add(slug);
+
+      const title = ($(el).text().trim() || slug.replace(/-/g, ' ')).replace(/\s*[·•|-]\s*letterboxd\s*$/i, '').trim();
+      items.push({
+        title,
+        slug,
+        url: `${this.baseUrl}/film/${slug}/`,
+      });
+    });
+
+    return items.slice(0, 8);
   }
 
   async getFilm(slug) {
@@ -1226,94 +1780,67 @@ class LetterboxdClient {
   }
 
   async getMemberPinned(username) {
-    const url = `${this.baseUrl}/${username}/`;
-    const html = await this.fetchHtml(url);
-    const $ = cheerio.load(html);
-    let items = [];
-
-    const section = this._findFavoritesSection($);
-    if (section && section.length) {
-      items = this._extractPosterItems($, section);
-    }
-
-    if (!items.length) {
-      const heading = $('h2, h3')
-        .filter((i, el) => {
-          const text = $(el).text().trim().toLowerCase();
-          return text.includes('favorite') || text.includes('favourite');
-        })
-        .first();
-      if (heading.length) {
-        const container = heading.closest('section, div, li, article');
-        if (container.length) {
-          items = this._extractPosterItems($, container);
-        }
-        if (!items.length) {
-          const next = heading.parent().next();
-          if (next.length) {
-            items = this._extractPosterItems($, next);
-          }
-        }
-      }
-    }
-
-    if (!items.length) {
-      const candidates = $('[id*="fav"], [class*="fav"]').filter((i, el) => {
-        const id = ($(el).attr('id') || '').toLowerCase();
-        const cls = ($(el).attr('class') || '').toLowerCase();
-        return id.includes('favor') || id.includes('favour') || cls.includes('favor') || cls.includes('favour');
-      });
-
-      let best = [];
-      candidates.each((i, el) => {
-        const found = this._extractPosterItems($, $(el));
-        if (found.length > best.length) {
-          best = found;
-        }
-      });
-      items = best;
-    }
-
-    if (!items.length) {
-      items = this._extractPosterItems($);
-    }
-
-    return { username, items };
+    const home = await this._getProfileHomeData(username);
+    return { username, items: home.favourites };
   }
 
   async getMemberWatchlist(username, options = {}) {
     const url = this.resolveCursor(options.cursor, `${this.baseUrl}/${username}/watchlist/`);
-    return this.fetchPage(url, ($) => this._extractPosterItems($), options.limit);
+    try {
+      return await this.fetchPage(url, ($) => this._extractPosterItems($), options);
+    } catch (err) {
+      if (!String(err || '').includes('Cloudflare challenge')) throw err;
+      if (options.allowHomeFallback === false) throw err;
+      const home = await this._getProfileHomeData(username);
+      return { items: home.watchlist, nextCursor: null };
+    }
   }
 
   async getMemberFilms(username, options = {}) {
     const url = this.resolveCursor(options.cursor, `${this.baseUrl}/${username}/films/`);
-    return this.fetchPage(url, ($) => this._extractPosterItems($), options.limit);
+    try {
+      return await this.fetchPage(url, ($) => this._extractPosterItems($), options);
+    } catch (err) {
+      if (!String(err || '').includes('Cloudflare challenge')) throw err;
+      if (options.allowHomeFallback === false) throw err;
+      const home = await this._getProfileHomeData(username);
+      return { items: home.recent, nextCursor: null };
+    }
   }
 
   async getMemberRatings(username, options = {}) {
     const url = this.resolveCursor(options.cursor, `${this.baseUrl}/${username}/films/ratings/`);
-    return this.fetchPage(
-      url,
-      ($) => {
-        const items = [];
-        $('.poster-grid .griditem, .poster-container, .poster-list .posteritem').each((i, el) => {
-          const imgAlt = $(el).find('img').attr('alt') || '';
-          const title = imgAlt.replace(/^Poster for /, '').trim();
-          const slug =
-            $(el).find('[data-item-slug]').attr('data-item-slug') ||
-            $(el).find('[data-film-slug]').attr('data-film-slug') ||
-            $(el).find('.poster').attr('data-film-slug') ||
-            $(el).find('a').attr('href')?.split('/').filter(Boolean).pop();
-          const rating = $(el).find('.poster-viewingdata .rating').text().trim();
-          if (title && slug) {
-            items.push({ title, slug, rating });
-          }
-        });
-        return items;
-      },
-      options.limit
-    );
+    try {
+      return await this.fetchPage(
+        url,
+        ($) => {
+          const items = [];
+          $('.poster-grid .griditem, .poster-container, .poster-list .posteritem').each((i, el) => {
+            const imgAlt = $(el).find('img').attr('alt') || '';
+            const title = imgAlt.replace(/^Poster for /, '').trim();
+            const slug =
+              $(el).find('[data-item-slug]').attr('data-item-slug') ||
+              $(el).find('[data-film-slug]').attr('data-film-slug') ||
+              $(el).find('.poster').attr('data-film-slug') ||
+              $(el).find('a').attr('href')?.split('/').filter(Boolean).pop();
+            const rating = $(el).find('.poster-viewingdata .rating').text().trim();
+            if (title && slug) {
+              items.push({ title, slug, rating });
+            }
+          });
+          return items;
+        },
+        options
+      );
+    } catch (err) {
+      if (!String(err || '').includes('Cloudflare challenge')) throw err;
+      if (options.allowHomeFallback === false) throw err;
+      const home = await this._getProfileHomeData(username);
+      return {
+        items: home.recent.filter((item) => item.rating),
+        nextCursor: null,
+      };
+    }
   }
 
   async getMemberReviews(username, options = {}) {
@@ -1360,51 +1887,58 @@ class LetterboxdClient {
         });
         return items;
       },
-      options.limit
+      options
     );
   }
 
   async getMemberDiary(username, options = {}) {
     const url = this.resolveCursor(options.cursor, `${this.baseUrl}/${username}/diary/`);
-    return this.fetchPage(
-      url,
-      ($) => {
-        const items = [];
-        $('.diary-entry-row, tr.diary-entry-row, table#diary-table tbody tr').each((i, el) => {
-          const row = $(el);
-          const titleLink = row
-            .find('.td-film-details h3 a, .td-film-details a, a[href*="/film/"]')
-            .first();
-          const title = titleLink.text().trim();
-          if (!title) return;
+    try {
+      return await this.fetchPage(
+        url,
+        ($) => {
+          const items = [];
+          $('.diary-entry-row, tr.diary-entry-row, table#diary-table tbody tr').each((i, el) => {
+            const row = $(el);
+            const titleLink = row
+              .find('.td-film-details h3 a, .td-film-details a, a[href*="/film/"]')
+              .first();
+            const title = titleLink.text().trim();
+            if (!title) return;
 
-          const slug =
-            titleLink
-              .attr('href')
-              ?.split('/')
-              .filter(Boolean)
-              .pop() ||
-            row.attr('data-film-slug') ||
-            row.find('[data-film-slug]').attr('data-film-slug') ||
-            '';
+            const slug =
+              titleLink
+                .attr('href')
+                ?.split('/')
+                .filter(Boolean)
+                .pop() ||
+              row.attr('data-film-slug') ||
+              row.find('[data-film-slug]').attr('data-film-slug') ||
+              '';
 
-          const day = row.find('.td-calendar .day, .calendar-day, .day').first().text().trim();
-          const month = row.find('.td-calendar .month, .calendar-month, .month').first().text().trim();
-          let date = [day, month].filter(Boolean).join(' ');
-          if (!date) {
-            const dateTime = row.find('time').attr('datetime');
-            if (dateTime) {
-              date = dateTime.split('T')[0];
+            const day = row.find('.td-calendar .day, .calendar-day, .day').first().text().trim();
+            const month = row.find('.td-calendar .month, .calendar-month, .month').first().text().trim();
+            let date = [day, month].filter(Boolean).join(' ');
+            if (!date) {
+              const dateTime = row.find('time').attr('datetime');
+              if (dateTime) {
+                date = dateTime.split('T')[0];
+              }
             }
-          }
 
-          const rating = row.find('.td-rating .rating, .rating').first().text().trim();
-          items.push({ date, title, slug, rating });
-        });
-        return items;
-      },
-      options.limit
-    );
+            const rating = row.find('.td-rating .rating, .rating').first().text().trim();
+            items.push({ date, title, slug, rating });
+          });
+          return items;
+        },
+        options
+      );
+    } catch (err) {
+      if (!String(err || '').includes('Cloudflare challenge')) throw err;
+      if (options.allowHomeFallback === false) throw err;
+      const home = await this._getProfileHomeData(username);
+      return { items: home.recent, nextCursor: null };
+    }
   }
 
   async getCurrentUser(options = {}) {
@@ -1466,8 +2000,8 @@ class LetterboxdClient {
       }
 
       if (!this.username || this.username.includes('@')) {
-        const envUser = process.env.LETTERBOXD_USERNAME;
-        if (envUser && !envUser.includes('@')) {
+        const envUser = normalizeLetterboxdSlug(process.env.LETTERBOXD_USERNAME);
+        if (envUser) {
           this.username = envUser;
         }
       }
@@ -1477,15 +2011,18 @@ class LetterboxdClient {
 
   async _ensureBrowser() {
     if (this.browserContext) return;
+    const browserArgs = [
+      '--disable-blink-features=AutomationControlled',
+      '--lang=en-US,en',
+    ];
+    if (IS_LINUX) {
+      browserArgs.unshift('--no-sandbox');
+    }
     const launchOptions = {
       headless: this.browserHeadless,
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 },
-      args: [
-        '--no-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--lang=en-US,en',
-      ],
+      args: browserArgs,
       locale: 'en-US',
       timezoneId: 'Asia/Shanghai',
       extraHTTPHeaders: {
@@ -1523,6 +2060,12 @@ class LetterboxdClient {
       }
     }
     this.browser = this.browserContext.browser() || null;
+
+    for (const page of this.browserContext.pages()) {
+      if (page.url() === 'about:blank') {
+        await page.close().catch(() => {});
+      }
+    }
 
     if (STEALTH_MODE) {
       await this.browserContext.addInitScript(() => {
@@ -1617,15 +2160,133 @@ class LetterboxdClient {
       await actionFn(page);
       
       // Sync back cookies from browser
-      const newCookies = await this.browserContext.cookies();
-      for (const cookie of newCookies) {
-        this.cookies[cookie.name] = cookie.value;
-      }
-      this.cookieHeader = Object.entries(this.cookies)
-        .map(([key, value]) => `${key}=${value}`)
-        .join('; ');
+      await this._syncCookiesFromBrowserContext();
         
       return true;
+    } finally {
+      await page.close();
+    }
+  }
+
+  async _toggleFilmCollectionViaHttp(slug, remove, endpoints) {
+    await this.ensureLoggedIn();
+
+    // If browser context has fresher auth cookies, sync them back to HTTP client first.
+    if (this.browserContext) {
+      try {
+        await this._syncCookiesFromBrowserContext();
+      } catch {}
+    }
+
+    const html = await this.fetchHtml(`${this.baseUrl}/film/${slug}/`, { skipLogin: true });
+    const filmId = this._extractFilmIdFromHtml(html, slug);
+    if (!filmId) {
+      throw new Error(`[collection-http-fallback] 无法提取 filmId: ${slug}`);
+    }
+
+    const csrf = this._getCsrfToken(html);
+    if (!csrf || csrf === 'placeholder') {
+      throw new Error('[collection-http-fallback] 缺少有效 CSRF token');
+    }
+
+    let lastStatus = 0;
+    for (const endpoint of endpoints) {
+      const body = new URLSearchParams();
+      body.append('__csrf', csrf);
+      body.append('filmId', String(filmId));
+      if (remove) body.append('remove', 'true');
+
+      const res = await this._request('POST', `${this.baseUrl}${endpoint}`, {
+        data: body.toString(),
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Referer': `${this.baseUrl}/film/${slug}/`,
+          'Origin': this.baseUrl,
+        },
+        skipLogin: true,
+      });
+      lastStatus = res.status;
+      if (res.status >= 200 && res.status < 400) {
+        return true;
+      }
+    }
+
+    throw new Error(`[collection-http-fallback] 所有端点失败，最后状态码: ${lastStatus}`);
+  }
+
+  async _toggleFilmCollectionViaBrowserFetch(slug, remove, endpoints) {
+    await this.ensureLoggedIn();
+    await this._ensureBrowser();
+
+    const page = await this.browserContext.newPage();
+    try {
+      // Load a first-party page to ensure origin/session are warm before posting AJAX actions.
+      await page.goto(this.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+
+      const meta = await page.evaluate(async ({ baseUrl, slug }) => {
+        const filmUrl = `${baseUrl}/film/${slug}/`;
+        const res = await fetch(filmUrl, { credentials: 'include' });
+        const html = await res.text();
+        const filmIdMatch =
+          html.match(/data-film-id=["'](\d+)["']/i) ||
+          html.match(/"uid"\s*:\s*"film:(\d+)"/i);
+        const cookieCsrf = document.cookie
+          .split('; ')
+          .find((r) => r.startsWith('com.xk72.webparts.csrf='))
+          ?.split('=')[1] || '';
+        const inputCsrfMatch = html.match(/name=["']__csrf["'][^>]*value=["']([^"']+)/i);
+        const csrf = decodeURIComponent((cookieCsrf || (inputCsrfMatch ? inputCsrfMatch[1] : '') || '').trim());
+        return {
+          ok: res.ok,
+          status: res.status,
+          filmId: filmIdMatch ? filmIdMatch[1] : '',
+          csrf,
+        };
+      }, { baseUrl: this.baseUrl, slug });
+
+      if (!meta.filmId) {
+        throw new Error(`[collection-browser-fallback] 无法提取 filmId (status=${meta.status})`);
+      }
+      if (!meta.csrf || meta.csrf === 'placeholder') {
+        throw new Error('[collection-browser-fallback] 缺少有效 CSRF token');
+      }
+
+      const ajaxResult = await page.evaluate(async ({ filmId, csrf, remove, endpoints }) => {
+        let lastStatus = 0;
+        for (const endpoint of endpoints) {
+          try {
+            const body = new URLSearchParams();
+            body.append('__csrf', csrf);
+            body.append('filmId', String(filmId));
+            if (remove) body.append('remove', 'true');
+
+            const res = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+              },
+              credentials: 'include',
+              body: body.toString(),
+            });
+            lastStatus = res.status;
+            if (res.ok || res.status === 200) {
+              return { ok: true, endpoint, status: res.status };
+            }
+          } catch {
+            // Try next endpoint.
+          }
+        }
+        return { ok: false, lastStatus };
+      }, { filmId: meta.filmId, csrf: meta.csrf, remove, endpoints });
+
+      if (ajaxResult && ajaxResult.ok) {
+        console.log(`[collection-browser-fallback] ✅ 成功 (${ajaxResult.endpoint}, status=${ajaxResult.status})`);
+        return true;
+      }
+
+      throw new Error(`[collection-browser-fallback] 所有端点失败，最后状态码: ${ajaxResult && ajaxResult.lastStatus}`);
     } finally {
       await page.close();
     }
@@ -1851,9 +2512,9 @@ class LetterboxdClient {
       console.warn(`[addToWatchlist] 预读取电影元数据失败，将回退到页面提取: ${e.message}`);
     }
     
-    return this._performAction(meta.filmUrl, async (page) => {
-      try {
-        console.log(`[addToWatchlist] 页面已加载: ${meta.filmUrl}`);
+    const applyWatchlistAction = async (page) => {
+        try {
+          console.log(`[addToWatchlist] 页面已加载: ${meta.filmUrl}`);
 
         let filmId = meta.filmId;
         let csrf = meta.csrf;
@@ -1958,17 +2619,110 @@ class LetterboxdClient {
         } else {
           console.log(`[addToWatchlist] 已在目标状态，无需操作`);
         }
-      } catch (error) {
-        console.error(`[addToWatchlist] ❌ 错误: ${error.message}`);
+        } catch (error) {
+          console.error(`[addToWatchlist] ❌ 错误: ${error.message}`);
+          throw error;
+        }
+      };
+
+    try {
+      return await this._performAction(meta.filmUrl, applyWatchlistAction);
+    } catch (error) {
+      const msg = String(error && error.message ? error.message : error);
+      const shouldTryHttpFallback =
+        msg.includes('ERR_HTTP_RESPONSE_CODE_FAILURE') ||
+        msg.includes('无法找到 watchlist 按钮') ||
+        msg.includes('Cloudflare') ||
+        msg.includes('520');
+      if (!shouldTryHttpFallback) {
         throw error;
       }
-    });
+
+      // First retry in visible browser mode; this often bypasses transient challenge blocks.
+      if (this.browserHeadless) {
+        console.warn(`[addToWatchlist] 页面导航失败，切换可视浏览器重试: ${msg}`);
+        await this.close().catch(() => {});
+        this.browserHeadless = false;
+        try {
+          return await this._performAction(meta.filmUrl, applyWatchlistAction, { visibleRetry: true });
+        } catch (visibleErr) {
+          console.warn(`[addToWatchlist] 可视浏览器重试失败: ${visibleErr && visibleErr.message ? visibleErr.message : visibleErr}`);
+        }
+      }
+
+      const watchlistEndpoints = [
+        '/s/save-film-to-watchlist',
+        '/s/toggle-film-watchlist',
+      ];
+
+      try {
+        console.warn(`[addToWatchlist] 页面操作失败，尝试浏览器 AJAX 兜底: ${msg}`);
+        return await this._toggleFilmCollectionViaBrowserFetch(slug, remove, watchlistEndpoints);
+      } catch (browserFallbackErr) {
+        console.warn(`[addToWatchlist] 浏览器 AJAX 兜底失败，尝试 HTTP 兜底: ${browserFallbackErr && browserFallbackErr.message ? browserFallbackErr.message : browserFallbackErr}`);
+        return this._toggleFilmCollectionViaHttp(slug, remove, watchlistEndpoints);
+      }
+    }
+  }
+
+  async _toggleLikeViaHttpFallback(slug, remove = false) {
+    const html = await this.fetchHtml(`${this.baseUrl}/film/${slug}/`, { skipLogin: true });
+    const filmId = this._extractFilmIdFromHtml(html, slug);
+    if (!filmId) {
+      throw new Error(`[toggleLike-http-fallback] 无法提取 filmId: ${slug}`);
+    }
+
+    const csrf = this._getCsrfToken(html);
+    if (!csrf || csrf === 'placeholder') {
+      throw new Error('[toggleLike-http-fallback] 缺少有效 CSRF token');
+    }
+
+    const likeableId = `film:${filmId}`;
+    const endpointCandidates = [
+      '/s/like-film',
+      '/s/toggle-like',
+      '/s/film-like',
+      '/s/like',
+    ];
+
+    let lastStatus = 0;
+    for (const endpoint of endpointCandidates) {
+      const body = new URLSearchParams();
+      body.append('__csrf', csrf);
+      body.append('filmId', String(filmId));
+      body.append('likeableId', likeableId);
+      body.append('likeableUid', likeableId);
+      body.append('likeable', likeableId);
+      if (remove) {
+        body.append('remove', 'true');
+        body.append('unlike', 'true');
+      }
+
+      const res = await this._request('POST', `${this.baseUrl}${endpoint}`, {
+        data: body.toString(),
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Referer': `${this.baseUrl}/film/${slug}/`,
+          'Origin': this.baseUrl,
+        },
+        skipLogin: true,
+      });
+      lastStatus = res.status;
+      if (res.status >= 200 && res.status < 400) {
+        console.log(`[toggleLike] ✅ HTTP 兜底成功 (${endpoint}, status=${res.status})`);
+        return true;
+      }
+    }
+
+    throw new Error(`[toggleLike-http-fallback] 所有端点失败，最后状态码: ${lastStatus}`);
   }
 
   async toggleLike(slug, reviewId = null, remove = false) {
     await this.ensureLoggedIn();
     const url = `${this.baseUrl}/film/${slug}/`;
-    return this._performAction(url, async (page) => {
+    try {
+      return await this._performAction(url, async (page) => {
         if (reviewId) {
             const likeBtn = page.locator(`.review-like[data-review-id="${reviewId}"]`);
             await likeBtn.click();
@@ -2015,7 +2769,21 @@ class LetterboxdClient {
             }
         }
         await page.waitForTimeout(1000);
-    });
+      });
+    } catch (error) {
+      const msg = String(error && error.message ? error.message : error);
+      const shouldTryHttpFallback =
+        msg.includes('ERR_HTTP_RESPONSE_CODE_FAILURE') ||
+        msg.includes('Cloudflare') ||
+        msg.includes('520') ||
+        msg.includes('未找到主电影 like 按钮');
+      if (!shouldTryHttpFallback) {
+        throw error;
+      }
+
+      console.warn(`[toggleLike] 页面操作失败，尝试 HTTP 兜底: ${msg}`);
+      return this._toggleLikeViaHttpFallback(slug, remove);
+    }
   }
 
   async writeReview(slug, options = {}) {
