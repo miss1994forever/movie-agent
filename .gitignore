@@ -11,6 +11,8 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+*.tsbuildinfo
+web/backend/data/
 
 # 忽略 Node.js 依赖
 node_modules/

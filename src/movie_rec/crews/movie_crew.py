@@ -28,6 +28,7 @@ from ..tools.letterboxd_tools import (
     ToggleLikeTool,
     WriteReviewTool,
 )
+from ..core.config import CREW_VERBOSE
 
 
 class MovieCrew:
@@ -107,7 +108,7 @@ class MovieCrew:
             agents=[analyst, scout, curator, account_mgr],
             tasks=[taste_task, scouting_task, curation_task, account_task],
             process=Process.sequential,
-            verbose=True,
+            verbose=CREW_VERBOSE,
         )
 
         result = crew.kickoff()

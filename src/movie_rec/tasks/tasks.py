@@ -1,10 +1,10 @@
 """Task factory functions for the movie recommendation crew.
 
 Pipeline (sequential):
-  1. taste_analysis  → structured taste profile from Letterboxd account
-  2. film_scouting   → candidate shortlist (context: taste_analysis)
-  3. curation        → final 1-2 picks with reasoning (context: both above)
-  4. account_sync    → Letterboxd write operations (context: curation)
+    1. taste_analysis  → structured taste profile from Letterboxd account
+    2. film_scouting   → candidate shortlist (context: taste_analysis)
+    3. curation        → final 2-3 picks with reasoning (context: both above)
+    4. account_sync    → Letterboxd write operations (context: curation)
 """
 from crewai import Task
 
@@ -66,24 +66,27 @@ def create_film_scouting_task(
             f"User's current mood: {mood}\n\n"
             "Using the taste profile from the previous task:\n\n"
             "⚠️  HARD RULE: The taste profile contains a '[FILM SCOUT — HARD EXCLUDE]' line listing "
-            "already-watched slugs. You MUST NOT include any film from that list in your shortlist. "
-            "Check every candidate's slug against the exclusion list before including it.\n\n"
+            "already-watched slugs. You MUST NOT include any film from that list in your shortlist, backup list, "
+            "or tie-break recommendations unless the user explicitly asks for rewatches. Check every candidate's slug "
+            "against the exclusion list before including it.\n\n"
+            "⚠️  SECOND RULE: The taste profile may contain a '[FILM SCOUT — LOW PRIORITY REWATCH]' line. "
+            "Those films are not forbidden, but they should rank below unseen options and should almost never appear "
+            "when stronger unseen candidates exist.\n\n"
             "Steps for each candidate film:\n"
-            "1. Call `search_films` to find the film. Prefer the exact Letterboxd slug returned by search results; "
-            "TMDB-style metadata is fallback context only when Letterboxd search is unavailable.\n"
-            "2. Call `get_film` with that slug to VERIFY it exists and obtain runtime and "
-            "avg Letterboxd rating. If not found, try a slightly simplified slug "
-            "(drop subtitles, remove special characters).\n"
-            "3. Cross-check the verified slug against the exclusion list. Discard and pick "
-            "a different film if it matches.\n\n"
+            "1. Call `search_films` to discover candidates quickly. Treat the returned slug as a best-effort hint during exploration.\n"
+            "2. Only call `get_film` for the strongest finalists you are seriously considering keeping in the shortlist, "
+            "or when a title is ambiguous and you need to confirm the right slug. Do NOT verify every exploratory search result.\n"
+            "3. Cross-check each verified finalist slug against the exclusion list. Discard and pick "
+            "a different film if it matches.\n"
+            "4. Before producing the final shortlist, perform a final self-audit: every main pick and every backup pick must be unseen unless the user explicitly asked for rewatches. Do not ask the user to check the exclusion list for you.\n\n"
             "Aim for variety in the shortlist (e.g. mix of well-known and hidden gems), "
             "but every pick must be genuinely defensible given the taste brief."
             f"{constraint}"
         ),
         expected_output=(
             "A shortlist of 3–5 films. For each:\n"
-            "  Title (Chinese + English, year, country, runtime, ⭐ avg rating from get_film)\n"
-            "  slug: <exact-letterboxd-slug-from-search>\n"
+            "  Title (Chinese + English, year, country, runtime, ⭐ avg rating when verified via get_film)\n"
+            "  slug: <best available Letterboxd slug hint; verified for finalists>\n"
             "  Why it fits: [1–2 sentences linking taste profile + current mood]"
         ),
         agent=agent,
@@ -100,7 +103,7 @@ def create_curation_task(
 ) -> Task:
     """
     Task 3 — no tools; pure synthesis.
-    Reads the taste profile + candidate shortlist, makes the final 1-2 picks,
+    Reads the taste profile + candidate shortlist, makes the final 2-3 picks,
     and writes emotionally resonant recommendations.
     human_input=True so the user can accept or redirect before account actions.
     """
@@ -112,15 +115,16 @@ def create_curation_task(
             "  • A taste profile brief (from the Taste Analyst)\n"
             "  • A candidate shortlist with slugs (from the Film Scout)\n\n"
             "Your job: make the decisive final choice.\n"
-            "Select 1 film (2 at most if both are genuinely excellent) from the shortlist. "
+            "Select 2 films by default, or 3 films if the shortlist supports it without lowering quality. "
             "Do NOT search for new films — work only with what the Scout provided.\n\n"
+            "Do NOT collapse to a single recommendation unless the shortlist is genuinely too weak to support 2 options.\n"
             "Write a recommendation that feels personal and immediate: "
             "connect the film's core themes to the user's emotional state right now, "
             "reference something specific from their taste profile, "
             "and end with one sentence that makes them want to start watching immediately."
         ),
         expected_output=(
-            "1–2 final recommendations. Each must include:\n"
+            "2–3 final recommendations. Each must include:\n"
             "• Chinese + English title, year, country, runtime, ⭐ avg rating\n"
             "• slug: <letterboxd-slug>\n"
             "• 推荐理由 (120+ chars): themes, why it fits the mood, "
@@ -140,7 +144,7 @@ def create_account_task(agent, curation_task: Task) -> Task:
     return Task(
         description=(
             "Review the movie recommendations delivered in the previous task.\n"
-            "Ask the user which actions they want to perform on Letterboxd:\n"
+            "Ask the user which actions they want to perform on Letterboxd for each recommended film they care about:\n"
             "  • Add to watchlist\n"
             "  • Mark as watched\n"
             "  • Rate (provide a 0.5–5 star value; internally 1–10)\n"

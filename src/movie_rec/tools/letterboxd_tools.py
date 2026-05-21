@@ -74,12 +74,6 @@ def _extract_query_title_and_year(query: str) -> tuple[str, str | None]:
     return title or normalized, year
 
 
-def _normalize_title_for_compare(value: str) -> str:
-    normalized = (value or "").lower().strip()
-    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
-    return " ".join(normalized.split())
-
-
 def _truncate(d: Any, limit: int = 4000) -> str:
     text = json.dumps(d, ensure_ascii=False)
     return text[:limit] if len(text) > limit else text
@@ -116,6 +110,7 @@ class GetUserContextTool(BaseTool):
         lines = []
         warnings: list[str] = []
         watched_slugs: list[str] = []  # accumulated for the exclusion section
+        low_priority_rewatch_slugs: list[str] = []
         resolved_username = _clean_username(username)
         has_user_line = False
         has_favourites = False
@@ -141,20 +136,22 @@ class GetUserContextTool(BaseTool):
                 titles = [f"{f.get('title', '?')} ({f.get('year', '')})" for f in favourites[:8]]
                 lines.append(f"[HIGH PRIORITY] Favorites: {', '.join(titles)}")
                 watched_slugs += [item.get("slug", "") for item in favourites if item.get("slug")]
+                low_priority_rewatch_slugs += [item.get("slug", "") for item in favourites if item.get("slug")]
                 has_favourites = True
 
             top_rated = [item for item in ratings if _parse_rating(item.get("rating")) >= 4.0][:8]
             if top_rated:
                 titles = [f"{f.get('title', '?')} ({f.get('rating', '')})" for f in top_rated]
                 lines.append(f"[HIGH PRIORITY] Highly-rated / liked films: {', '.join(titles)}")
+                low_priority_rewatch_slugs += [item.get("slug", "") for item in top_rated if item.get("slug")]
                 has_ratings = True
-            watched_slugs += [item.get("slug", "") for item in ratings[:30] if item.get("slug")]
+            watched_slugs += [item.get("slug", "") for item in ratings[:120] if item.get("slug")]
 
             if recent:
                 titles = [item.get("title", "?") for item in recent[:10]]
                 lines.append(f"Recently watched: {', '.join(titles)}")
                 has_recent = True
-            watched_slugs += [item.get("slug", "") for item in recent[:30] if item.get("slug")]
+            watched_slugs += [item.get("slug", "") for item in recent[:120] if item.get("slug")]
 
             if watchlist:
                 titles = [item.get("title", item.get("slug", "?")) for item in watchlist[:10]]
@@ -196,33 +193,35 @@ class GetUserContextTool(BaseTool):
                     titles = [f"{f.get('title', '?')} ({f.get('year', '')})" for f in films]
                     lines.append(f"[HIGH PRIORITY] Favorites: {', '.join(titles)}")
                     watched_slugs += [f.get("slug", "") for f in films if f.get("slug")]
+                    low_priority_rewatch_slugs += [f.get("slug", "") for f in films if f.get("slug")]
             except Exception as exc:
                 warnings.append(f"Could not read favourites: {exc}")
 
         # Highly-rated films from the ratings page (best available proxy for "liked" films)
         if not has_ratings:
             try:
-                data = _call(self.session, "get_member_ratings", {"username": resolved_username, "maxPages": 1})
+                data = _call(self.session, "get_member_ratings", {"username": resolved_username, "maxPages": 2})
                 films = data.get("items") or data.get("films") or []
                 top_rated = [f for f in films if _parse_rating(f.get("rating")) >= 4.0][:8]
                 if top_rated:
                     titles = [f"{f.get('title', '?')} ({f.get('rating', '')})"
                               for f in top_rated]
                     lines.append(f"[HIGH PRIORITY] Highly-rated / liked films: {', '.join(titles)}")
-                watched_slugs += [f.get("slug", "") for f in films[:30] if f.get("slug")]
+                    low_priority_rewatch_slugs += [f.get("slug", "") for f in top_rated if f.get("slug")]
+                watched_slugs += [f.get("slug", "") for f in films[:120] if f.get("slug")]
             except Exception as exc:
                 warnings.append(f"Could not read ratings/liked films: {exc}")
 
         # Watched films log — collect recently watched for exclusion and taste signals
         if not has_recent:
             try:
-                data = _call(self.session, "get_member_films", {"username": resolved_username, "maxPages": 1})
+                data = _call(self.session, "get_member_films", {"username": resolved_username, "maxPages": 2})
                 films = data.get("items") or data.get("films") or []
                 recent = films[:10]
                 if recent:
                     titles = [f.get("title", "?") for f in recent]
                     lines.append(f"Recently watched: {', '.join(titles)}")
-                watched_slugs += [f.get("slug", "") for f in films[:30] if f.get("slug")]
+                watched_slugs += [f.get("slug", "") for f in films[:120] if f.get("slug")]
             except Exception as exc:
                 warnings.append(f"Could not read watched films: {exc}")
 
@@ -250,10 +249,17 @@ class GetUserContextTool(BaseTool):
 
         # ── Exclusion list for the Film Scout ─────────────────────────────────
         unique_watched = list(dict.fromkeys(s for s in watched_slugs if s))
+        low_priority_rewatch = [s for s in dict.fromkeys(low_priority_rewatch_slugs) if s]
         if unique_watched:
             lines.append(
                 f"[FILM SCOUT — HARD EXCLUDE] Already watched — do NOT recommend any of these: "
-                + ", ".join(unique_watched[:40])
+                + ", ".join(unique_watched[:150])
+            )
+        if low_priority_rewatch:
+            lines.append(
+                "[FILM SCOUT — LOW PRIORITY REWATCH] These are favourites or highly-rated rewatches. "
+                "Only use them if the user explicitly asks for rewatches or if you genuinely cannot find stronger unseen options: "
+                + ", ".join(low_priority_rewatch[:40])
             )
 
         if len(lines) <= 1 and warnings:
@@ -276,8 +282,8 @@ class SearchFilmsTool(BaseTool):
 
     name: str = "search_films"
     description: str = (
-        "Search for films. Prefers real Letterboxd search results for slug resolution and falls back "
-        "to TMDB metadata when needed. Always verify the slug with get_film before using it in write operations."
+        "Search for films quickly. Uses TMDB first when available for discovery metadata and falls back "
+        "to Letterboxd search when needed. Returned slugs are best-effort hints; verify finalists with get_film before write operations."
     )
     args_schema: Type[BaseModel] = SearchFilmsInput
     session: Any
@@ -286,40 +292,15 @@ class SearchFilmsTool(BaseTool):
 
     def _run(self, query: str) -> str:
         title_query, release_year = _extract_query_title_and_year(query)
-        letterboxd_result = self._letterboxd_search(query, preferred_year=release_year)
-        if letterboxd_result:
-            return letterboxd_result
-
         api_key = os.getenv("TMDB_API_KEY", "")
         if api_key:
             result = self._tmdb_search(title_query, api_key, preferred_year=release_year)
             if result:
                 return result
+        letterboxd_result = self._letterboxd_search(query, preferred_year=release_year)
+        if letterboxd_result:
+            return letterboxd_result
         return f"No results found for '{query}'. Letterboxd search may be blocked or returned an empty page."
-
-    def _verify_letterboxd_slug(self, title: str, year: str | None, slug: str) -> bool:
-        try:
-            data = _call(self.session, "get_film", {"slug": slug})
-        except Exception:
-            return False
-        if not data:
-            return False
-        result_title = _normalize_title_for_compare(str(data.get("title", "")))
-        expected_title = _normalize_title_for_compare(title)
-        if result_title != expected_title:
-            return False
-        result_year = str(data.get("year", "") or "")[:4]
-        return not year or result_year == year
-
-    def _resolve_verified_slug(self, title: str, year: str | None) -> str:
-        base_slug = _estimate_slug(title)
-        candidates = [base_slug]
-        if year:
-            candidates.insert(0, f"{base_slug}-{year}")
-        for candidate in dict.fromkeys(candidates):
-            if self._verify_letterboxd_slug(title, year, candidate):
-                return candidate
-        return ""
 
     def _tmdb_search(self, query: str, api_key: str, preferred_year: str | None = None) -> str:
         import httpx
@@ -349,7 +330,8 @@ class SearchFilmsTool(BaseTool):
             year = (m.get("release_date") or "")[:4]
             vote = m.get("vote_average") or 0
             overview = (m.get("overview") or "")[:120]
-            slug = self._resolve_verified_slug(title, preferred_year or year) or _estimate_slug(title)
+            base_slug = _estimate_slug(title)
+            slug = f"{base_slug}-{year}" if preferred_year and year == preferred_year else base_slug
             signature = (slug, year)
             if signature in seen:
                 continue

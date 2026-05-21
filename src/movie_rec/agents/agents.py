@@ -7,7 +7,7 @@ Crew pipeline (4 agents, sequential):
   4. Account Manager — syncs user decisions back to Letterboxd (write)
 """
 from crewai import Agent, LLM
-from ..core.config import DASHSCOPE_API_KEY, AI_MODEL, DASHSCOPE_BASE_URL
+from ..core.config import DASHSCOPE_API_KEY, AI_MODEL, DASHSCOPE_BASE_URL, CREW_VERBOSE
 
 
 def _llm() -> LLM:
@@ -38,7 +38,7 @@ def create_taste_analyst_agent(context_tools: list) -> Agent:
         ),
         tools=context_tools,
         llm=_llm(),
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
     )
 
@@ -52,17 +52,19 @@ def create_film_scout_agent(search_tools: list) -> Agent:
         role="Film Scout",
         goal=(
             "Find 3–5 candidate films that match both the taste profile and the user's "
-            "current mood. Gather each film's slug, runtime, avg rating, and key themes."
+            "current mood while aggressively filtering out already-watched titles and low-priority rewatches. "
+            "Gather each finalist's slug, runtime, avg rating, and key themes."
         ),
         backstory=(
             "You are a researcher with encyclopaedic knowledge of world cinema and "
             "direct access to Letterboxd's film database. "
             "You cast a wide net first, then trim ruthlessly to the most promising candidates, "
-            "always including the Letterboxd slug so picks can be actioned immediately."
+            "always including the Letterboxd slug so picks can be actioned immediately. "
+            "You never offload exclusion checking to the user: if a film is already watched, it is your mistake to correct before answering."
         ),
         tools=search_tools,
         llm=_llm(),
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
     )
 
@@ -76,8 +78,8 @@ def create_curator_agent() -> Agent:
     return Agent(
         role="Chief Curator",
         goal=(
-            "Select the single best film (or two at most) from the candidate shortlist "
-            "and write a compelling, mood-matched recommendation."
+            "Select the best 2 films by default, or 3 when quality stays high, from the candidate shortlist "
+            "and write compelling, mood-matched recommendations."
         ),
         backstory=(
             "You are a seasoned film programmer who believes great recommendations are "
@@ -87,7 +89,7 @@ def create_curator_agent() -> Agent:
             "to watch the film right now."
         ),
         llm=_llm(),
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
     )
 
@@ -106,6 +108,6 @@ def create_account_agent(write_tools: list) -> Agent:
         ),
         tools=write_tools,
         llm=_llm(),
-        verbose=True,
+        verbose=CREW_VERBOSE,
         allow_delegation=False,
     )

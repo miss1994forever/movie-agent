@@ -23,6 +23,7 @@ AI_MODEL = os.getenv("AI_MODEL", "qwen-max")
 DASHSCOPE_BASE_URL = os.getenv(
     "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
+CREW_VERBOSE = os.getenv("CREW_VERBOSE", "false").lower() in {"1", "true", "yes"}
 
 # ── Letterboxd write-protected tools ────────────────────────────────────────
 WRITE_TOOLS = frozenset({
