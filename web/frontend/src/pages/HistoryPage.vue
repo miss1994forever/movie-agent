@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { Trash2 } from "lucide-vue-next";
+import MarkdownView from "../components/MarkdownView.vue";
+import MovieCard from "../components/MovieCard.vue";
 import { deleteHistoryItem, listHistory } from "../api/history";
 import type { RecommendationJob } from "../api/types";
 
@@ -69,7 +71,15 @@ onMounted(refresh);
       <template v-if="selected">
         <p>Saved Recommendation</p>
         <h2>{{ selected.mood }}</h2>
-        <pre class="result-text">{{ selected.result_text }}</pre>
+        <div v-if="selected.movies.length" class="movie-grid">
+          <MovieCard
+            v-for="movie in selected.movies"
+            :key="movie.slug || movie.title"
+            :movie="movie"
+            :actions="false"
+          />
+        </div>
+        <MarkdownView :content="selected.result_text" />
       </template>
       <p v-else class="empty-state">Select a recommendation.</p>
     </section>

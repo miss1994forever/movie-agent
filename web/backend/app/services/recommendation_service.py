@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
 
 from ..core.settings import get_external_mcp_url
+
+import httpx
 
 from movie_rec.cli.cli import detect_watchlist_only
 from movie_rec.core.mcp_manager import extract_json, mcp_session, preflight_check
@@ -14,11 +17,13 @@ from movie_rec.crews.movie_crew import MovieCrew
 
 from ..schemas.history import HistoryItem
 from ..schemas.recommendation import (
+    AgentStatus,
     MovieRecommendation,
     RecommendationJobResponse,
     JobStatus,
 )
 from .history_service import save_history
+from .runtime_status import record_event, set_active_job
 
 
 _jobs: dict[str, RecommendationJobResponse] = {}
@@ -54,7 +59,100 @@ def _extract_movies(result_text: str) -> list[MovieRecommendation]:
                 movies.append(MovieRecommendation.model_validate(item))
         if movies:
             return movies
-    return []
+    return _extract_movies_from_text(result_text)
+
+
+def _strip_recommendation_json(result_text: str) -> str:
+    text = re.sub(
+        r"\n?```json\s*\{\s*\"recommendations\"\s*:\s*\[.*?\]\s*\}\s*```\s*$",
+        "",
+        result_text,
+        flags=re.DOTALL,
+    ).rstrip()
+    if text != result_text.rstrip():
+        return text
+    return re.sub(
+        r"\n?```\s*\{\s*\"recommendations\"\s*:\s*\[.*?\]\s*\}\s*```\s*$",
+        "",
+        result_text,
+        flags=re.DOTALL,
+    ).rstrip()
+
+
+def _extract_movies_from_text(result_text: str) -> list[MovieRecommendation]:
+    movies: list[MovieRecommendation] = []
+    lines = result_text.splitlines()
+    for index, line in enumerate(lines):
+        slug_match = re.search(r"\bslug\s*:\s*([a-z0-9][a-z0-9-]*)", line, flags=re.IGNORECASE)
+        if not slug_match:
+            continue
+        slug = slug_match.group(1).strip()
+        context = " ".join(lines[max(0, index - 3) : index + 2])
+        year_match = re.search(r"\b(19\d{2}|20\d{2})\b", context)
+        title = _guess_title_from_context(context, slug)
+        if any(movie.slug == slug for movie in movies):
+            continue
+        movies.append(
+            MovieRecommendation(
+                title=title,
+                year=int(year_match.group(1)) if year_match else None,
+                slug=slug,
+                reason="See the recommendation text for details.",
+                letterboxd_url=f"https://letterboxd.com/film/{slug}/",
+            )
+        )
+    return movies[:5]
+
+
+def _guess_title_from_context(context: str, slug: str) -> str:
+    cleaned = re.sub(r"[*#`•\-\d.]+", " ", context)
+    cleaned = re.sub(r"\bslug\s*:\s*[a-z0-9-]+", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" :：,，")
+    if cleaned:
+        return cleaned[:90]
+    return slug.replace("-", " ").title()
+
+
+async def _enrich_movie_posters(movies: list[MovieRecommendation]) -> list[MovieRecommendation]:
+    api_key = os.getenv("TMDB_API_KEY", "").strip()
+    if not api_key:
+        return movies
+
+    async with httpx.AsyncClient(timeout=8) as client:
+        enriched: list[MovieRecommendation] = []
+        for movie in movies:
+            if movie.poster_url:
+                enriched.append(movie)
+                continue
+            poster_url = await _fetch_tmdb_poster(client, api_key, movie)
+            enriched.append(movie.model_copy(update={"poster_url": poster_url} if poster_url else {}))
+        return enriched
+
+
+async def _fetch_tmdb_poster(
+    client: httpx.AsyncClient,
+    api_key: str,
+    movie: MovieRecommendation,
+) -> str | None:
+    try:
+        response = await client.get(
+            "https://api.themoviedb.org/3/search/movie",
+            params={
+                "api_key": api_key,
+                "query": movie.title,
+                "include_adult": "false",
+                **({"primary_release_year": movie.year} if movie.year else {}),
+            },
+        )
+        response.raise_for_status()
+        results = response.json().get("results") or []
+    except Exception:
+        return None
+
+    if not results:
+        return None
+    poster_path = results[0].get("poster_path")
+    return f"https://image.tmdb.org/t/p/w342{poster_path}" if poster_path else None
 
 
 async def create_recommendation_job(mood: str) -> RecommendationJobResponse:
@@ -63,9 +161,11 @@ async def create_recommendation_job(mood: str) -> RecommendationJobResponse:
         job_id=job_id,
         status="queued",
         mood=mood.strip(),
+        stage="queued",
         created_at=_now(),
     )
     _jobs[job_id] = job
+    record_event(f"Queued recommendation job for mood: {job.mood}", job_id=job_id)
     asyncio.create_task(_run_job(job_id))
     return job
 
@@ -74,25 +174,89 @@ def get_recommendation_job(job_id: str) -> RecommendationJobResponse | None:
     return _jobs.get(job_id)
 
 
+def _update_job_stage(job_id: str, stage: str) -> None:
+    job = _jobs.get(job_id)
+    if not job:
+        return
+    job.stage = stage
+    _jobs[job_id] = job
+
+
+def _update_agent_status(job_id: str, event_type: str, message: str) -> None:
+    job = _jobs.get(job_id)
+    if not job:
+        return
+
+    statuses = [status.model_copy() for status in job.agent_statuses]
+    events = [*job.events, _format_agent_event(event_type, message)][-12:]
+
+    if event_type in {"agent_running", "agent_completed"}:
+        name = message
+        existing = next((status for status in statuses if status.name == name), None)
+        if not existing:
+            existing = AgentStatus(name=name, status="pending")
+            statuses.append(existing)
+        if event_type == "agent_running":
+            for status in statuses:
+                if status.status == "running":
+                    status.status = "completed"
+            existing.status = "running"
+            existing.detail = "Working..."
+        else:
+            existing.status = "completed"
+            existing.detail = "Done"
+    elif event_type == "agent_step":
+        name, _, detail = message.partition(": ")
+        existing = next((status for status in statuses if status.name == name), None)
+        if existing:
+            existing.detail = detail[:180] if detail else existing.detail
+
+    job.agent_statuses = statuses
+    job.events = events
+    _jobs[job_id] = job
+
+
+def _format_agent_event(event_type: str, message: str) -> str:
+    labels = {
+        "agent_running": "Started",
+        "agent_completed": "Completed",
+        "agent_step": "Step",
+    }
+    return f"{labels.get(event_type, event_type)}: {message}"
+
+
 async def _run_job(job_id: str) -> None:
     async with _job_lock:
         job = _jobs[job_id]
         job.status = "running"
+        job.stage = "starting"
+        job.agent_statuses = [
+            AgentStatus(name="Personal Taste Analyst", status="pending"),
+            AgentStatus(name="Film Scout", status="pending"),
+            AgentStatus(name="Chief Curator", status="pending"),
+        ]
         _jobs[job_id] = job
+        set_active_job(job_id)
+        record_event("Recommendation job started.", job_id=job_id)
 
         try:
-            result_text = await _run_recommendation(job.mood)
+            result_text = await _run_recommendation(job.mood, job_id)
+            _update_job_stage(job_id, "parsing_results")
             movies = _extract_movies(result_text)
+            movies = await _enrich_movie_posters(movies)
+            display_text = _strip_recommendation_json(result_text)
             finished = _now()
             completed = job.model_copy(
                 update={
                     "status": "succeeded",
-                    "result_text": result_text,
+                    "stage": "finished",
+                    "result_text": display_text,
                     "movies": movies,
                     "finished_at": finished,
                 }
             )
             _jobs[job_id] = completed
+            record_event("Recommendation job finished.", job_id=job_id)
             await save_history(
                 HistoryItem(
                     id=job_id,
@@ -106,20 +270,31 @@ async def _run_job(job_id: str) -> None:
                 )
             )
         except Exception as exc:
+            error = _format_exception(exc)
             failed = job.model_copy(
                 update={
                     "status": "failed",
-                    "error": str(exc),
+                    "stage": "failed",
+                    "error": error,
                     "finished_at": _now(),
                 }
             )
             _jobs[job_id] = failed
+            record_event(error, level="error", job_id=job_id)
+        finally:
+            set_active_job(None)
 
 
-async def _run_recommendation(mood: str) -> str:
+async def _run_recommendation(mood: str, job_id: str) -> str:
     external_url = get_external_mcp_url()
     async with mcp_session(external_url) as session:
-        await preflight_check(session)
+        _update_job_stage(job_id, "checking_letterboxd")
+        record_event("MCP session connected.")
+        ok, info = await preflight_check(session)
+        if ok:
+            record_event(f"Letterboxd preflight passed for @{info}." if info else "Letterboxd preflight passed.")
+        else:
+            record_event(f"Letterboxd preflight warning: {info}", level="warning")
         watchlist_only_candidates: str | None = None
         if detect_watchlist_only(mood):
             raw = await session.call_tool(
@@ -139,5 +314,26 @@ async def _run_recommendation(mood: str) -> str:
             session=session,
             mood=mood,
             watchlist_only_candidates=watchlist_only_candidates,
+            status_callback=lambda event_type, message: _update_agent_status(job_id, event_type, message),
         )
-        return crew.run()
+        _update_job_stage(job_id, "running_crewai")
+        record_event("Starting crewAI recommendation pipeline.")
+        return crew.run_recommendation_only()
+
+
+def _format_exception(exc: BaseException) -> str:
+    text = _flatten_exception(exc)
+    lowered = text.lower()
+    if "invalid access token" in lowered or "token expired" in lowered:
+        return (
+            "AI provider authentication failed: invalid access token or token expired. "
+            "Update DASHSCOPE_API_KEY in .env, then restart the backend."
+        )
+    return text or exc.__class__.__name__
+
+
+def _flatten_exception(exc: BaseException) -> str:
+    children = getattr(exc, "exceptions", None)
+    if children:
+        return " | ".join(_flatten_exception(child) for child in children)
+    return str(exc)

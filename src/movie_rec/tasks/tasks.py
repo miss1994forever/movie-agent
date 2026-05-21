@@ -100,6 +100,7 @@ def create_curation_task(
     timestamp: str,
     taste_task: Task,
     scouting_task: Task,
+    human_input: bool = True,
 ) -> Task:
     """
     Task 3 — no tools; pure synthesis.
@@ -121,22 +122,40 @@ def create_curation_task(
             "Write a recommendation that feels personal and immediate: "
             "connect the film's core themes to the user's emotional state right now, "
             "reference something specific from their taste profile, "
-            "and end with one sentence that makes them want to start watching immediately."
+            "and end with one sentence that makes them want to start watching immediately.\n\n"
+            "At the very end, include one fenced JSON block that can be parsed by a web app. "
+            "The JSON must have this exact shape:\n"
+            "{\n"
+            '  "recommendations": [\n'
+            "    {\n"
+            '      "title": "English or original title",\n'
+            '      "year": 2000,\n'
+            '      "slug": "verified-letterboxd-slug",\n'
+            '      "director": "Director name",\n'
+            '      "reason": "One concise reason for the card UI.",\n'
+            '      "letterboxd_url": "https://letterboxd.com/film/verified-letterboxd-slug/"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "Only include films from your final recommendations in this JSON block. "
+            "Do not put comments or trailing commas inside the JSON."
         ),
         expected_output=(
             "2–3 final recommendations. Each must include:\n"
             "• Chinese + English title, year, country, runtime, ⭐ avg rating\n"
             "• slug: <letterboxd-slug>\n"
             "• 推荐理由 (120+ chars): themes, why it fits the mood, "
-            "  a specific connection to the user's taste profile"
+            "  a specific connection to the user's taste profile\n\n"
+            "End with a fenced JSON block containing `recommendations`, where each item has "
+            "`title`, `year`, `slug`, `director`, `reason`, and `letterboxd_url`."
         ),
         agent=agent,
         context=[taste_task, scouting_task],
-        human_input=True,
+        human_input=human_input,
     )
 
 
-def create_account_task(agent, curation_task: Task) -> Task:
+def create_account_task(agent, curation_task: Task, human_input: bool = True) -> Task:
     """
     Task 4 — sync user-selected films to Letterboxd.
     Receives the curated recommendations as context.
@@ -156,5 +175,5 @@ def create_account_task(agent, curation_task: Task) -> Task:
         expected_output="A summary of all Letterboxd account operations performed (or skipped).",
         agent=agent,
         context=[curation_task],
-        human_input=True,
+        human_input=human_input,
     )

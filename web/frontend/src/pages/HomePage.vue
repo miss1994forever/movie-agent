@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import AccountStatus from "../components/AccountStatus.vue";
 import ActionConfirmDialog from "../components/ActionConfirmDialog.vue";
 import LoadingTimeline from "../components/LoadingTimeline.vue";
+import MarkdownView from "../components/MarkdownView.vue";
 import MoodInput from "../components/MoodInput.vue";
 import MovieCard from "../components/MovieCard.vue";
 import { addToWatchlist, markWatched, rateFilm, toggleLike, writeReview } from "../api/letterboxd";
@@ -13,8 +14,14 @@ const store = useRecommendationStore();
 const pending = ref<{ action: string; movie: MovieRecommendation } | null>(null);
 const actionBusy = ref(false);
 const actionMessage = ref("");
+const actionRating = ref(8);
+const actionReview = ref("");
 
 const result = computed(() => store.current);
+const draftMood = computed({
+  get: () => store.draftMood,
+  set: (value: string) => store.setDraftMood(value),
+});
 const dialogTitle = computed(() => {
   if (!pending.value) return "";
   const labels: Record<string, string> = {
@@ -29,6 +36,8 @@ const dialogTitle = computed(() => {
 
 function requestAction(action: string, movie: MovieRecommendation) {
   pending.value = { action, movie };
+  actionRating.value = 8;
+  actionReview.value = "";
   actionMessage.value = "";
 }
 
@@ -42,8 +51,15 @@ async function confirmAction() {
     if (action === "watchlist") await addToWatchlist(slug);
     if (action === "watched") await markWatched(slug);
     if (action === "like") await toggleLike(slug);
-    if (action === "rate") await rateFilm(slug, 8);
-    if (action === "review") await writeReview(slug, `Recommended by Movie Rec: ${movie.reason ?? movie.title}`);
+    if (action === "rate") await rateFilm(slug, actionRating.value);
+    if (action === "review") {
+      const review = actionReview.value.trim();
+      if (!review) {
+        actionMessage.value = "Review text is required.";
+        return;
+      }
+      await writeReview(slug, review, actionRating.value);
+    }
     actionMessage.value = "Action completed.";
     pending.value = null;
   } catch (error) {
@@ -52,13 +68,22 @@ async function confirmAction() {
     actionBusy.value = false;
   }
 }
+
+onMounted(() => {
+  void store.restoreActiveJob();
+});
 </script>
 
 <template>
   <div class="page-stack">
     <AccountStatus />
-    <MoodInput :loading="store.loading" @submit="store.submitMood" />
-    <LoadingTimeline :active="store.loading" />
+    <MoodInput v-model="draftMood" :loading="store.loading" @submit="store.submitMood" />
+    <LoadingTimeline
+      :active="store.loading"
+      :stage="result?.stage"
+      :agents="result?.agent_statuses"
+      :events="result?.events"
+    />
 
     <p v-if="store.error" class="error-banner">{{ store.error }}</p>
     <p v-if="actionMessage" class="info-banner">{{ actionMessage }}</p>
@@ -78,7 +103,7 @@ async function confirmAction() {
         />
       </div>
 
-      <pre class="result-text">{{ result.result_text }}</pre>
+      <MarkdownView :content="result.result_text" />
     </section>
 
     <ActionConfirmDialog
@@ -86,6 +111,9 @@ async function confirmAction() {
       :title="dialogTitle"
       :message="pending ? `This will modify your Letterboxd account for ${pending.movie.title}.` : ''"
       :busy="actionBusy"
+      :action="pending?.action"
+      v-model:rating="actionRating"
+      v-model:review="actionReview"
       @cancel="pending = null"
       @confirm="confirmAction"
     />

@@ -625,7 +625,35 @@ The implementation is complete when:
 7. Secrets never appear in frontend responses or browser logs.
 8. The README documents how to start backend and frontend.
 
-## 11. Suggested README Addition
+## 11. Current Implementation Status
+
+Implemented in this repository:
+
+- FastAPI backend skeleton, CORS, health check, auth check, recommendation jobs, Letterboxd action routes, and history routes.
+- Web-specific read-only recommendation flow that runs Taste Analyst, Film Scout, and Chief Curator without terminal `human_input` prompts.
+- Final curation prompt requests a fenced JSON block for movie cards, with backend fallback parsing for `slug:` lines.
+- SQLite recommendation history at `web/backend/data/movie_rec.sqlite3`.
+- Vue 3 frontend with Home, History, and Settings views.
+- Account status strip and Settings config status that never expose raw secrets.
+- Confirmation dialog for watchlist, watched, like, rate, and review actions.
+- Rating and review inputs before Letterboxd write calls.
+- README web startup instructions.
+
+Verification run:
+
+```text
+python -m compileall src/movie_rec web/backend
+npm run build
+pytest -q
+```
+
+Notes:
+
+- Start the backend with `--loop asyncio`; the existing crewAI tools use `nest_asyncio`, which is not compatible with uvicorn's default `uvloop`.
+- If Vite port `5173` is busy, open the alternate URL printed by `npm run dev`.
+- Letterboxd write actions should be tested with a known slug before relying on them for regular account updates.
+
+## 12. Suggested README Addition
 
 After implementation, add this section to `README.md`:
 

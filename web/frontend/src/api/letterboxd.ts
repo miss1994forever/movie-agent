@@ -1,8 +1,12 @@
 import { apiJson } from "./client";
-import type { AuthCheck } from "./types";
+import type { AuthCheck, DeepAuthCheck } from "./types";
 
 export async function checkAuth(): Promise<AuthCheck> {
   return apiJson("/api/auth/check");
+}
+
+export async function deepCheckAuth(): Promise<DeepAuthCheck> {
+  return apiJson("/api/auth/deep-check");
 }
 
 export async function addToWatchlist(slug: string, remove = false) {

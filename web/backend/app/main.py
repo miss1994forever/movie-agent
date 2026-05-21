@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import auth, history, letterboxd, recommendations
+from .api import auth, history, letterboxd, recommendations, status
 from .storage.database import init_db
 
 
@@ -15,6 +15,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5173",
     ],
+    allow_origin_regex=r"http://(127\.0\.0\.1|localhost):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,3 +36,4 @@ app.include_router(auth.router)
 app.include_router(recommendations.router)
 app.include_router(letterboxd.router)
 app.include_router(history.router)
+app.include_router(status.router)

@@ -4,6 +4,7 @@ Pipeline (sequential):
   Taste Analyst → Film Scout → Chief Curator → Account Manager
 """
 from datetime import datetime
+from typing import Callable, Any
 from crewai import Crew, Process
 
 from ..agents.agents import (
@@ -45,10 +46,12 @@ class MovieCrew:
         session,
         mood: str,
         watchlist_only_candidates: str | None = None,
+        status_callback: Callable[[str, str], None] | None = None,
     ):
         self.session = session
         self.mood = mood
         self.watchlist_only_candidates = watchlist_only_candidates
+        self.status_callback = status_callback
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Tool factories ────────────────────────────────────────────────────────
@@ -78,11 +81,17 @@ class MovieCrew:
 
     def run(self) -> str:
         """Build and kick off the crew synchronously. Returns the final output string."""
+        return self._run(include_account_task=True, human_input=True)
+
+    def run_recommendation_only(self) -> str:
+        """Run the read-only recommendation pipeline for the web UI."""
+        return self._run(include_account_task=False, human_input=False)
+
+    def _run(self, include_account_task: bool, human_input: bool) -> str:
         # Agents (each only sees the tools it actually needs)
         analyst = create_taste_analyst_agent(self._context_tools())
         scout = create_film_scout_agent(self._search_tools())
         curator = create_curator_agent()
-        account_mgr = create_account_agent(self._write_tools())
 
         # Tasks (context chain: each receives the outputs of prior tasks it depends on)
         taste_task = create_taste_analysis_task(
@@ -101,15 +110,66 @@ class MovieCrew:
             timestamp=self.timestamp,
             taste_task=taste_task,
             scouting_task=scouting_task,
+            human_input=human_input,
         )
-        account_task = create_account_task(agent=account_mgr, curation_task=curation_task)
+        agents = [analyst, scout, curator]
+        tasks = [taste_task, scouting_task, curation_task]
+
+        if include_account_task:
+            account_mgr = create_account_agent(self._write_tools())
+            account_task = create_account_task(
+                agent=account_mgr,
+                curation_task=curation_task,
+                human_input=human_input,
+            )
+            agents.append(account_mgr)
+            tasks.append(account_task)
+
+        task_agent_names = [getattr(task.agent, "role", f"Agent {index + 1}") for index, task in enumerate(tasks)]
+        current_task_index = {"value": 0}
+
+        def emit(event_type: str, message: str) -> None:
+            if self.status_callback:
+                self.status_callback(event_type, message)
+
+        def task_callback(output: Any) -> None:
+            index = current_task_index["value"]
+            agent_name = task_agent_names[index] if index < len(task_agent_names) else "Agent"
+            emit("agent_completed", agent_name)
+            current_task_index["value"] = index + 1
+            if current_task_index["value"] < len(task_agent_names):
+                emit("agent_running", task_agent_names[current_task_index["value"]])
+
+        def step_callback(step: Any) -> None:
+            agent_name = task_agent_names[current_task_index["value"]] if current_task_index["value"] < len(task_agent_names) else "Agent"
+            step_text = self._summarize_step(step)
+            if step_text:
+                emit("agent_step", f"{agent_name}: {step_text}")
+
+        if task_agent_names:
+            emit("agent_running", task_agent_names[0])
 
         crew = Crew(
-            agents=[analyst, scout, curator, account_mgr],
-            tasks=[taste_task, scouting_task, curation_task, account_task],
+            agents=agents,
+            tasks=tasks,
             process=Process.sequential,
             verbose=CREW_VERBOSE,
+            task_callback=task_callback,
+            step_callback=step_callback,
         )
 
         result = crew.kickoff()
         return str(result)
+
+    @staticmethod
+    def _summarize_step(step: Any) -> str:
+        tool = getattr(step, "tool", None)
+        if tool:
+            return f"using tool `{tool}`"
+        log = getattr(step, "log", None)
+        if isinstance(log, str) and log.strip():
+            return log.strip().splitlines()[0][:160]
+        thought = getattr(step, "thought", None)
+        if isinstance(thought, str) and thought.strip():
+            return thought.strip().splitlines()[0][:160]
+        return ""

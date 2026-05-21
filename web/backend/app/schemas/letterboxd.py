@@ -10,6 +10,16 @@ class AuthCheckResponse(BaseModel):
     config: dict[str, bool]
 
 
+class DeepAuthCheckResponse(BaseModel):
+    ok: bool
+    username: str | None = None
+    logged_in: bool = False
+    profile_read_ok: bool = False
+    watchlist_read_ok: bool = False
+    warnings: list[str] = []
+    error: str | None = None
+
+
 class ConfirmedSlugRequest(BaseModel):
     slug: str = Field(min_length=1)
     confirmed: bool

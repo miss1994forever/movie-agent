@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { ref } from "vue";
 import { Send } from "lucide-vue-next";
 
-defineProps<{
+const props = defineProps<{
   loading: boolean;
+  modelValue: string;
 }>();
 
 const emit = defineEmits<{
   submit: [string];
+  "update:modelValue": [string];
 }>();
 
-const mood = ref("");
 const quickMoods = [
   "想看轻松但有余味的电影",
   "从 watchlist 里挑一部今晚适合看的",
@@ -19,8 +19,12 @@ const quickMoods = [
 ];
 
 function submit() {
-  const value = mood.value.trim();
+  const value = props.modelValue.trim();
   if (value) emit("submit", value);
+}
+
+function updateMood(value: string) {
+  emit("update:modelValue", value);
 }
 </script>
 
@@ -29,18 +33,19 @@ function submit() {
     <label for="mood">What's your mood today?</label>
     <textarea
       id="mood"
-      v-model="mood"
+      :value="modelValue"
       rows="5"
       placeholder="比如：想看一部轻松、聪明、不要太长的电影"
+      @input="updateMood(($event.target as HTMLTextAreaElement).value)"
       @keydown.meta.enter.prevent="submit"
       @keydown.ctrl.enter.prevent="submit"
     />
     <div class="chips">
-      <button v-for="item in quickMoods" :key="item" type="button" @click="mood = item">
+      <button v-for="item in quickMoods" :key="item" type="button" @click="updateMood(item)">
         {{ item }}
       </button>
     </div>
-    <button class="primary-button" type="button" :disabled="loading || !mood.trim()" @click="submit">
+    <button class="primary-button" type="button" :disabled="loading || !modelValue.trim()" @click="submit">
       <Send :size="18" />
       <span>{{ loading ? "Recommending..." : "Get Recommendations" }}</span>
     </button>

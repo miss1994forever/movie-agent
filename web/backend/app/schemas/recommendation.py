@@ -16,6 +16,13 @@ class MovieRecommendation(BaseModel):
     director: str | None = None
     reason: str | None = None
     letterboxd_url: str | None = None
+    poster_url: str | None = None
+
+
+class AgentStatus(BaseModel):
+    name: str
+    status: str
+    detail: str = ""
 
 
 class RecommendationRequest(BaseModel):
@@ -26,6 +33,9 @@ class RecommendationJobResponse(BaseModel):
     job_id: str
     status: JobStatus
     mood: str
+    stage: str = "queued"
+    agent_statuses: list[AgentStatus] = Field(default_factory=list)
+    events: list[str] = Field(default_factory=list)
     result_text: str = ""
     movies: list[MovieRecommendation] = Field(default_factory=list)
     error: str | None = None

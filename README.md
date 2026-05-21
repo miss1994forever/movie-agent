@@ -179,6 +179,9 @@ Open:
 http://127.0.0.1:5173
 ```
 
+If that port is already occupied, Vite prints the next available local URL
+such as `http://127.0.0.1:5174`.
+
 Web behavior:
 
 1. `GET /api/auth/check` verifies Letterboxd connectivity.
@@ -186,6 +189,7 @@ Web behavior:
 3. The frontend polls the job until it succeeds or fails.
 4. Successful recommendations are saved to local SQLite at `web/backend/data/movie_rec.sqlite3`.
 5. Letterboxd write actions require an explicit confirmation dialog before the backend calls MCP write tools.
+6. The web recommendation flow is read-only until you click an action button; account sync is handled by the web UI, not by terminal prompts.
 
 See `docs/WEB_IMPLEMENTATION_INSTRUCTIONS.md` for the detailed implementation plan and milestones.
 
