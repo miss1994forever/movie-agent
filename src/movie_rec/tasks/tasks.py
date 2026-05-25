@@ -9,11 +9,20 @@ Pipeline (sequential):
 from crewai import Task
 
 
-def create_taste_analysis_task(agent, timestamp: str) -> Task:
+def create_taste_analysis_task(agent, timestamp: str, saved_taste_profile: str | None = None) -> Task:
     """
     Task 1 — read the authenticated user's Letterboxd profile and output a taste brief.
     Deliberately narrow scope: no searching, no recommendations yet.
     """
+    saved_context = ""
+    if saved_taste_profile:
+        saved_context = (
+            "\n\nSaved long-term taste profile from previous analysis:\n"
+            f"{saved_taste_profile}\n\n"
+            "Use this saved profile as prior context, but refresh it with current Letterboxd evidence. "
+            "If current account data conflicts with the saved profile, trust current account data more."
+        )
+
     return Task(
         description=(
             f"Current time: {timestamp}\n\n"
@@ -29,6 +38,7 @@ def create_taste_analysis_task(agent, timestamp: str) -> Task:
             "Identify patterns: preferred genres, national cinemas, directors, "
             "decade preferences, narrative styles, tonal range (contemplative vs energetic), "
             "and any notable gaps or patterns to avoid."
+            f"{saved_context}"
         ),
         expected_output=(
             "A concise taste profile brief (≤300 words) structured as:\n"

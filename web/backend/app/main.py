@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import auth, history, letterboxd, recommendations, status
+from .api import auth, history, letterboxd, recommendations, status, taste_profile
 from .storage.database import init_db
 
 
@@ -37,3 +37,4 @@ app.include_router(recommendations.router)
 app.include_router(letterboxd.router)
 app.include_router(history.router)
 app.include_router(status.router)
+app.include_router(taste_profile.router)

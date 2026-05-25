@@ -27,6 +27,7 @@ class AgentStatus(BaseModel):
 
 class RecommendationRequest(BaseModel):
     mood: str = Field(min_length=1, max_length=1000)
+    use_saved_taste_profile: bool = True
 
 
 class RecommendationJobResponse(BaseModel):

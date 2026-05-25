@@ -15,7 +15,10 @@ router = APIRouter(prefix="/api/recommendations", tags=["recommendations"])
 
 @router.post("", response_model=RecommendationCreateResponse)
 async def create_recommendation(request: RecommendationRequest) -> RecommendationCreateResponse:
-    job = await create_recommendation_job(request.mood)
+    job = await create_recommendation_job(
+        request.mood,
+        use_saved_taste_profile=request.use_saved_taste_profile,
+    )
     return RecommendationCreateResponse(job_id=job.job_id, status=job.status)
 
 

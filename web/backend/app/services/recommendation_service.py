@@ -24,6 +24,7 @@ from ..schemas.recommendation import (
 )
 from .history_service import save_history
 from .runtime_status import record_event, set_active_job
+from .taste_profile_service import format_profile_for_prompt, get_taste_profile
 
 
 _jobs: dict[str, RecommendationJobResponse] = {}
@@ -155,7 +156,7 @@ async def _fetch_tmdb_poster(
     return f"https://image.tmdb.org/t/p/w342{poster_path}" if poster_path else None
 
 
-async def create_recommendation_job(mood: str) -> RecommendationJobResponse:
+async def create_recommendation_job(mood: str, use_saved_taste_profile: bool = True) -> RecommendationJobResponse:
     job_id = str(uuid.uuid4())
     job = RecommendationJobResponse(
         job_id=job_id,
@@ -166,7 +167,7 @@ async def create_recommendation_job(mood: str) -> RecommendationJobResponse:
     )
     _jobs[job_id] = job
     record_event(f"Queued recommendation job for mood: {job.mood}", job_id=job_id)
-    asyncio.create_task(_run_job(job_id))
+    asyncio.create_task(_run_job(job_id, use_saved_taste_profile))
     return job
 
 
@@ -225,7 +226,7 @@ def _format_agent_event(event_type: str, message: str) -> str:
     return f"{labels.get(event_type, event_type)}: {message}"
 
 
-async def _run_job(job_id: str) -> None:
+async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
     async with _job_lock:
         job = _jobs[job_id]
         job.status = "running"
@@ -240,7 +241,7 @@ async def _run_job(job_id: str) -> None:
         record_event("Recommendation job started.", job_id=job_id)
 
         try:
-            result_text = await _run_recommendation(job.mood, job_id)
+            result_text = await _run_recommendation(job.mood, job_id, use_saved_taste_profile)
             _update_job_stage(job_id, "parsing_results")
             movies = _extract_movies(result_text)
             movies = await _enrich_movie_posters(movies)
@@ -285,7 +286,7 @@ async def _run_job(job_id: str) -> None:
             set_active_job(None)
 
 
-async def _run_recommendation(mood: str, job_id: str) -> str:
+async def _run_recommendation(mood: str, job_id: str, use_saved_taste_profile: bool) -> str:
     external_url = get_external_mcp_url()
     async with mcp_session(external_url) as session:
         _update_job_stage(job_id, "checking_letterboxd")
@@ -310,11 +311,18 @@ async def _run_recommendation(mood: str, job_id: str) -> str:
                 ]
                 watchlist_only_candidates = json.dumps(pairs, ensure_ascii=False)
 
+        saved_taste_profile = ""
+        if use_saved_taste_profile:
+            saved_taste_profile = format_profile_for_prompt(await get_taste_profile())
+            if saved_taste_profile:
+                record_event("Using saved taste profile for this recommendation.", job_id=job_id)
+
         crew = MovieCrew(
             session=session,
             mood=mood,
             watchlist_only_candidates=watchlist_only_candidates,
             status_callback=lambda event_type, message: _update_agent_status(job_id, event_type, message),
+            saved_taste_profile=saved_taste_profile,
         )
         _update_job_stage(job_id, "running_crewai")
         record_event("Starting crewAI recommendation pipeline.")

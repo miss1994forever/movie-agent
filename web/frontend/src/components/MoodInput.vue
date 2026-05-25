@@ -26,6 +26,7 @@ function submit() {
 function updateMood(value: string) {
   emit("update:modelValue", value);
 }
+
 </script>
 
 <template>
@@ -35,7 +36,7 @@ function updateMood(value: string) {
       id="mood"
       :value="modelValue"
       rows="5"
-      placeholder="比如：想看一部轻松、聪明、不要太长的电影"
+      placeholder="比如：今天有点累，想看一部轻松、聪明、不要太长的电影"
       @input="updateMood(($event.target as HTMLTextAreaElement).value)"
       @keydown.meta.enter.prevent="submit"
       @keydown.ctrl.enter.prevent="submit"

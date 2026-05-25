@@ -1,10 +1,13 @@
 import { apiJson } from "./client";
 import type { RecommendationJob } from "./types";
 
-export async function createRecommendation(mood: string): Promise<{ job_id: string; status: string }> {
+export async function createRecommendation(
+  mood: string,
+  useSavedTasteProfile = true,
+): Promise<{ job_id: string; status: string }> {
   return apiJson("/api/recommendations", {
     method: "POST",
-    body: JSON.stringify({ mood }),
+    body: JSON.stringify({ mood, use_saved_taste_profile: useSavedTasteProfile }),
   });
 }
 

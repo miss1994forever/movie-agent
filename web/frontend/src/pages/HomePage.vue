@@ -77,7 +77,11 @@ onMounted(() => {
 <template>
   <div class="page-stack">
     <AccountStatus />
-    <MoodInput v-model="draftMood" :loading="store.loading" @submit="store.submitMood" />
+    <MoodInput
+      v-model="draftMood"
+      :loading="store.loading"
+      @submit="store.submitMood"
+    />
     <LoadingTimeline
       :active="store.loading"
       :stage="result?.stage"

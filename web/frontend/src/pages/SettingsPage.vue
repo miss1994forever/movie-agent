@@ -19,10 +19,7 @@ const configRows = computed(() => {
   return [
     ["DashScope API key", config?.dashscope_api_key],
     ["TMDB API key", config?.tmdb_api_key],
-    ["Letterboxd username", config?.letterboxd_username],
-    ["Letterboxd password", config?.letterboxd_password],
-    ["Letterboxd credentials", config?.letterboxd_credentials],
-    ["Letterboxd cookie", config?.letterboxd_cookie],
+    ["Letterboxd account", config?.letterboxd_configured],
   ] as const;
 });
 
@@ -59,7 +56,7 @@ async function runDeepCheck() {
     <AccountStatus />
     <section class="settings-section">
       <h1>Settings</h1>
-      <p>Secrets stay in the backend `.env`; this page only shows whether each value is configured.</p>
+      <p>Secrets stay in the backend `.env`; this page only shows whether each required area is configured.</p>
       <p v-if="app.authError" class="error-banner">{{ app.authError }}</p>
       <p v-else-if="app.authLoading" class="info-banner">Checking configuration...</p>
       <div class="settings-table">

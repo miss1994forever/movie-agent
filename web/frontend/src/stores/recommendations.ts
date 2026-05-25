@@ -10,20 +10,22 @@ interface SavedState {
   draftMood: string;
   currentJobId: string;
   current: RecommendationJob | null;
+  useSavedTasteProfile: boolean;
 }
 
 function loadSavedState(): SavedState {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { draftMood: "", currentJobId: "", current: null };
+    if (!raw) return { draftMood: "", currentJobId: "", current: null, useSavedTasteProfile: true };
     return {
       draftMood: "",
       currentJobId: "",
       current: null,
+      useSavedTasteProfile: true,
       ...JSON.parse(raw),
     };
   } catch {
-    return { draftMood: "", currentJobId: "", current: null };
+    return { draftMood: "", currentJobId: "", current: null, useSavedTasteProfile: true };
   }
 }
 
@@ -38,6 +40,7 @@ export const useRecommendationStore = defineStore("recommendations", {
       current: saved.current,
       currentJobId: saved.currentJobId,
       draftMood: saved.draftMood,
+      useSavedTasteProfile: saved.useSavedTasteProfile,
       restored: false,
       polling: false,
     loading: false,
@@ -50,8 +53,13 @@ export const useRecommendationStore = defineStore("recommendations", {
         draftMood: this.draftMood,
         currentJobId: this.currentJobId,
         current: this.current,
+        useSavedTasteProfile: this.useSavedTasteProfile,
       };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    },
+    setUseSavedTasteProfile(value: boolean) {
+      this.useSavedTasteProfile = value;
+      this.persist();
     },
     setDraftMood(value: string) {
       this.draftMood = value;
@@ -82,7 +90,7 @@ export const useRecommendationStore = defineStore("recommendations", {
       this.loading = true;
       this.error = "";
       try {
-        const created = await createRecommendation(mood);
+        const created = await createRecommendation(mood, this.useSavedTasteProfile);
         this.currentJobId = created.job_id;
         this.persist();
         await this.pollJob(created.job_id);

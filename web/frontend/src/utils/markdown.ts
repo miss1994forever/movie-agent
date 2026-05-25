@@ -10,6 +10,7 @@ function escapeHtml(value: string): string {
 function renderInline(value: string): string {
   return escapeHtml(value)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*(?!\s)(.+?)(?<!\s)\*/g, "$1<em>$2</em>")
     .replace(/`(.+?)`/g, "<code>$1</code>")
     .replace(
       /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
@@ -32,6 +33,13 @@ export function renderMarkdown(markdown: string): string {
           .map((line) => `<li>${renderInline(line.trim().replace(/^[-*•]\s+/, ""))}</li>`)
           .join("");
         return `<ul>${items}</ul>`;
+      }
+      if (lines.every((line) => /^\d+[.)]\s+/.test(line.trim()))) {
+        const firstNumber = Number(lines[0].trim().match(/^(\d+)/)?.[1] ?? "1");
+        const items = lines
+          .map((line) => `<li>${renderInline(line.trim().replace(/^\d+[.)]\s+/, ""))}</li>`)
+          .join("");
+        return `<ol${firstNumber > 1 ? ` start="${firstNumber}"` : ""}>${items}</ol>`;
       }
       return `<p>${lines.map(renderInline).join("<br>")}</p>`;
     })

@@ -47,11 +47,13 @@ class MovieCrew:
         mood: str,
         watchlist_only_candidates: str | None = None,
         status_callback: Callable[[str, str], None] | None = None,
+        saved_taste_profile: str | None = None,
     ):
         self.session = session
         self.mood = mood
         self.watchlist_only_candidates = watchlist_only_candidates
         self.status_callback = status_callback
+        self.saved_taste_profile = saved_taste_profile
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Tool factories ────────────────────────────────────────────────────────
@@ -97,6 +99,7 @@ class MovieCrew:
         taste_task = create_taste_analysis_task(
             agent=analyst,
             timestamp=self.timestamp,
+            saved_taste_profile=self.saved_taste_profile,
         )
         scouting_task = create_film_scouting_task(
             agent=scout,

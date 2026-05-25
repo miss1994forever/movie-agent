@@ -29,6 +29,18 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS taste_profile (
+              id TEXT PRIMARY KEY,
+              summary TEXT NOT NULL,
+              exploration_suggestions TEXT NOT NULL,
+              raw_profile TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
         await db.commit()
     finally:
         await db.close()

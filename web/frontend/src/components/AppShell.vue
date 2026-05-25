@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { Film, History, Settings } from "lucide-vue-next";
+import { Film, History, Settings, UserRoundSearch } from "lucide-vue-next";
 
 defineProps<{
-  active: "home" | "history" | "settings";
+  active: "home" | "history" | "taste" | "settings";
 }>();
 
 const emit = defineEmits<{
-  change: ["home" | "history" | "settings"];
+  change: ["home" | "history" | "taste" | "settings"];
 }>();
 </script>
 
@@ -33,6 +33,14 @@ const emit = defineEmits<{
           @click="emit('change', 'history')"
         >
           <History :size="19" />
+        </button>
+        <button
+          type="button"
+          :class="{ active: active === 'taste' }"
+          title="Taste Profile"
+          @click="emit('change', 'taste')"
+        >
+          <UserRoundSearch :size="19" />
         </button>
         <button
           type="button"

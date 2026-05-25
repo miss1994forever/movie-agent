@@ -25,6 +25,15 @@ export interface RecommendationJob {
   finished_at?: string | null;
 }
 
+export interface TasteProfile {
+  id: string;
+  summary: string;
+  exploration_suggestions: string;
+  raw_profile: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AgentStatus {
   name: string;
   status: string;

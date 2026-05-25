@@ -24,11 +24,14 @@ def get_external_mcp_url() -> str | None:
 
 
 def public_config_status() -> dict[str, bool]:
+    has_username_password = bool(
+        os.getenv("LETTERBOXD_USERNAME", "").strip()
+        and os.getenv("LETTERBOXD_PASSWORD", "").strip()
+    )
+    has_credentials = bool(os.getenv("LETTERBOXD_CREDENTIALS", "").strip())
+    has_cookie = bool(os.getenv("LETTERBOXD_COOKIE", "").strip())
     return {
         "dashscope_api_key": bool(os.getenv("DASHSCOPE_API_KEY", "").strip()),
         "tmdb_api_key": bool(os.getenv("TMDB_API_KEY", "").strip()),
-        "letterboxd_username": bool(os.getenv("LETTERBOXD_USERNAME", "").strip()),
-        "letterboxd_password": bool(os.getenv("LETTERBOXD_PASSWORD", "").strip()),
-        "letterboxd_credentials": bool(os.getenv("LETTERBOXD_CREDENTIALS", "").strip()),
-        "letterboxd_cookie": bool(os.getenv("LETTERBOXD_COOKIE", "").strip()),
+        "letterboxd_configured": has_username_password or has_credentials or has_cookie,
     }

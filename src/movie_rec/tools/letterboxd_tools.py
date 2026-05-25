@@ -142,14 +142,14 @@ class GetUserContextTool(BaseTool):
             top_rated = [item for item in ratings if _parse_rating(item.get("rating")) >= 4.0][:8]
             if top_rated:
                 titles = [f"{f.get('title', '?')} ({f.get('rating', '')})" for f in top_rated]
-                lines.append(f"[HIGH PRIORITY] Highly-rated / liked films: {', '.join(titles)}")
+                lines.append(f"[HIGH PRIORITY] Highly-rated films (rating evidence, not necessarily red-heart likes): {', '.join(titles)}")
                 low_priority_rewatch_slugs += [item.get("slug", "") for item in top_rated if item.get("slug")]
                 has_ratings = True
             watched_slugs += [item.get("slug", "") for item in ratings[:120] if item.get("slug")]
 
             if recent:
                 titles = [item.get("title", "?") for item in recent[:10]]
-                lines.append(f"Recently watched: {', '.join(titles)}")
+                lines.append(f"[LOW PRIORITY] Recently watched without explicit like/favourite signal: {', '.join(titles)}")
                 has_recent = True
             watched_slugs += [item.get("slug", "") for item in recent[:120] if item.get("slug")]
 
@@ -220,7 +220,7 @@ class GetUserContextTool(BaseTool):
                 recent = films[:10]
                 if recent:
                     titles = [f.get("title", "?") for f in recent]
-                    lines.append(f"Recently watched: {', '.join(titles)}")
+                lines.append(f"[LOW PRIORITY] Recently watched without explicit like/favourite signal: {', '.join(titles)}")
                 watched_slugs += [f.get("slug", "") for f in films[:120] if f.get("slug")]
             except Exception as exc:
                 warnings.append(f"Could not read watched films: {exc}")
