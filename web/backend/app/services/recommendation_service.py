@@ -23,12 +23,14 @@ from ..schemas.recommendation import (
     JobStatus,
 )
 from .history_service import save_history
-from .runtime_status import record_event, set_active_job
+from .runtime_status import get_status, record_event, set_active_job
 from .taste_profile_service import format_profile_for_prompt, get_taste_profile
 
 
 _jobs: dict[str, RecommendationJobResponse] = {}
+_job_tasks: dict[str, asyncio.Task] = {}
 _job_lock = asyncio.Lock()
+_tool_stats: dict[str, dict[str, dict[str, float]]] = {}
 
 
 def _now() -> datetime:
@@ -78,6 +80,13 @@ def _strip_recommendation_json(result_text: str) -> str:
         result_text,
         flags=re.DOTALL,
     ).rstrip()
+
+
+def _clean_display_text(result_text: str) -> str:
+    text = _strip_recommendation_json(result_text)
+    text = re.sub(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$\n?", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _extract_movies_from_text(result_text: str) -> list[MovieRecommendation]:
@@ -167,12 +176,38 @@ async def create_recommendation_job(mood: str, use_saved_taste_profile: bool = T
     )
     _jobs[job_id] = job
     record_event(f"Queued recommendation job for mood: {job.mood}", job_id=job_id)
-    asyncio.create_task(_run_job(job_id, use_saved_taste_profile))
+    _job_tasks[job_id] = asyncio.create_task(_run_job(job_id, use_saved_taste_profile))
     return job
 
 
 def get_recommendation_job(job_id: str) -> RecommendationJobResponse | None:
     return _jobs.get(job_id)
+
+
+def cancel_recommendation_job(job_id: str) -> RecommendationJobResponse | None:
+    job = _jobs.get(job_id)
+    if job is None:
+        return None
+    if job.status not in {"queued", "running"}:
+        return job
+
+    task = _job_tasks.get(job_id)
+    if task and not task.done():
+        task.cancel()
+
+    cancelled = job.model_copy(
+        update={
+            "status": "cancelled",
+            "stage": "cancelled",
+            "error": "Recommendation job cancelled.",
+            "finished_at": _now(),
+        }
+    )
+    _jobs[job_id] = cancelled
+    if get_status().get("active_job_id") == job_id:
+        set_active_job(None)
+    record_event("Recommendation job cancelled.", level="warning", job_id=job_id)
+    return cancelled
 
 
 def _update_job_stage(job_id: str, stage: str) -> None:
@@ -189,7 +224,7 @@ def _update_agent_status(job_id: str, event_type: str, message: str) -> None:
         return
 
     statuses = [status.model_copy() for status in job.agent_statuses]
-    events = [*job.events, _format_agent_event(event_type, message)][-12:]
+    events = [*job.events, _format_agent_event(event_type, message)][-20:]
 
     if event_type in {"agent_running", "agent_completed"}:
         name = message
@@ -211,6 +246,11 @@ def _update_agent_status(job_id: str, event_type: str, message: str) -> None:
         existing = next((status for status in statuses if status.name == name), None)
         if existing:
             existing.detail = detail[:180] if detail else existing.detail
+    elif event_type == "tool_metric":
+        _record_tool_metric(job_id, message)
+        existing = next((status for status in statuses if status.name == "Film Scout"), None)
+        if existing:
+            existing.detail = message[:180]
 
     job.agent_statuses = statuses
     job.events = events
@@ -222,8 +262,35 @@ def _format_agent_event(event_type: str, message: str) -> str:
         "agent_running": "Started",
         "agent_completed": "Completed",
         "agent_step": "Step",
+        "tool_metric": "Tool",
     }
     return f"{labels.get(event_type, event_type)}: {message}"
+
+
+def _record_tool_metric(job_id: str, message: str) -> None:
+    tool_name, _, rest = message.partition(" | ")
+    elapsed_text, _, _target = rest.partition(" | ")
+    try:
+        elapsed = float(elapsed_text.removesuffix("s"))
+    except ValueError:
+        elapsed = 0.0
+
+    stats = _tool_stats.setdefault(job_id, {})
+    tool_stats = stats.setdefault(tool_name, {"calls": 0.0, "seconds": 0.0})
+    tool_stats["calls"] += 1
+    tool_stats["seconds"] += elapsed
+    record_event(f"Tool {message}", job_id=job_id)
+
+
+def _format_tool_summary(job_id: str) -> str:
+    stats = _tool_stats.get(job_id) or {}
+    parts = []
+    for tool_name in ["search_films", "get_film"]:
+        tool_stats = stats.get(tool_name)
+        if not tool_stats:
+            continue
+        parts.append(f"{tool_name}: {int(tool_stats['calls'])} calls, {tool_stats['seconds']:.2f}s total")
+    return " | ".join(parts)
 
 
 async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
@@ -245,9 +312,10 @@ async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
             _update_job_stage(job_id, "parsing_results")
             movies = _extract_movies(result_text)
             movies = await _enrich_movie_posters(movies)
-            display_text = _strip_recommendation_json(result_text)
+            display_text = _clean_display_text(result_text)
             finished = _now()
-            completed = job.model_copy(
+            latest_job = _jobs.get(job_id, job)
+            completed = latest_job.model_copy(
                 update={
                     "status": "succeeded",
                     "stage": "finished",
@@ -256,6 +324,10 @@ async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
                     "finished_at": finished,
                 }
             )
+            tool_summary = _format_tool_summary(job_id)
+            if tool_summary:
+                completed.events = [*completed.events, f"Tool summary: {tool_summary}"][-20:]
+                record_event(f"Tool summary: {tool_summary}", job_id=job_id)
             _jobs[job_id] = completed
             record_event("Recommendation job finished.", job_id=job_id)
             await save_history(
@@ -282,12 +354,28 @@ async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
             )
             _jobs[job_id] = failed
             record_event(error, level="error", job_id=job_id)
+        except asyncio.CancelledError:
+            latest_job = _jobs.get(job_id, job)
+            cancelled = latest_job.model_copy(
+                update={
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "error": "Recommendation job cancelled.",
+                    "finished_at": _now(),
+                }
+            )
+            _jobs[job_id] = cancelled
+            record_event("Recommendation job cancelled.", level="warning", job_id=job_id)
+            raise
         finally:
-            set_active_job(None)
+            if get_status().get("active_job_id") == job_id:
+                set_active_job(None)
+            _job_tasks.pop(job_id, None)
 
 
 async def _run_recommendation(mood: str, job_id: str, use_saved_taste_profile: bool) -> str:
     external_url = get_external_mcp_url()
+    event_loop = asyncio.get_running_loop()
     async with mcp_session(external_url) as session:
         _update_job_stage(job_id, "checking_letterboxd")
         record_event("MCP session connected.")
@@ -323,10 +411,12 @@ async def _run_recommendation(mood: str, job_id: str, use_saved_taste_profile: b
             watchlist_only_candidates=watchlist_only_candidates,
             status_callback=lambda event_type, message: _update_agent_status(job_id, event_type, message),
             saved_taste_profile=saved_taste_profile,
+            skip_live_taste_analysis=bool(saved_taste_profile),
+            event_loop=event_loop,
         )
         _update_job_stage(job_id, "running_crewai")
         record_event("Starting crewAI recommendation pipeline.")
-        return crew.run_recommendation_only()
+        return await asyncio.to_thread(crew.run_recommendation_only)
 
 
 def _format_exception(exc: BaseException) -> str:

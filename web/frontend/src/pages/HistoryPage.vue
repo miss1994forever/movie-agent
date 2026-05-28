@@ -5,7 +5,9 @@ import MarkdownView from "../components/MarkdownView.vue";
 import MovieCard from "../components/MovieCard.vue";
 import { deleteHistoryItem, listHistory } from "../api/history";
 import type { RecommendationJob } from "../api/types";
+import { useRecommendationStore } from "../stores/recommendations";
 
+const recommendationStore = useRecommendationStore();
 const items = ref<RecommendationJob[]>([]);
 const selected = ref<RecommendationJob | null>(null);
 const loading = ref(false);
@@ -28,6 +30,7 @@ async function refresh() {
 async function removeItem(id: string) {
   await deleteHistoryItem(id);
   if (selected.value?.job_id === id || selected.value?.id === id) selected.value = null;
+  await recommendationStore.handleHistoryDeleted(id);
   await refresh();
 }
 

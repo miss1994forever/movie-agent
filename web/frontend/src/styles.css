@@ -1,22 +1,32 @@
 :root {
-  --wa-ink: #023047;
-  --wa-ink-soft: #24556b;
-  --wa-ink-muted: #46758a;
+  --wa-ink: #8ecae6;
+  --wa-ink-soft: rgba(142, 202, 230, 0.82);
+  --wa-ink-muted: rgba(142, 202, 230, 0.62);
   --wa-page: #023047;
-  --wa-paper: #ffffff;
-  --wa-paper-warm: #eaf7fb;
-  --wa-card: #ffffff;
-  --wa-card-strong: #dff3fa;
-  --wa-line: #8ecae6;
-  --wa-line-soft: #c9e9f4;
-  --wa-accent: #ffb703;
+  --wa-paper: rgba(255, 255, 255, 0.05);
+  --wa-paper-warm: rgba(255, 255, 255, 0.08);
+  --wa-card: rgba(255, 255, 255, 0.05);
+  --wa-card-strong: rgba(255, 255, 255, 0.08);
+  --wa-line: rgba(142, 202, 230, 0.42);
+  --wa-line-soft: rgba(142, 202, 230, 0.24);
+  --wa-accent: #fb8500;
   --wa-accent-deep: #fb8500;
   --wa-mustard: #ffb703;
   --wa-sage: #219ebc;
   --wa-sea: #219ebc;
   --wa-rose: #ffb703;
-  --wa-danger-bg: #fff1cc;
-  --wa-info-bg: #dff3fa;
+  --wa-danger-bg: rgba(255, 183, 3, 0.12);
+  --wa-info-bg: rgba(142, 202, 230, 0.1);
+  --wa-heading: #ffffff;
+  --wa-topbar-bg: rgba(2, 48, 71, 0.88);
+  --wa-hover-bg: rgba(251, 133, 0, 0.14);
+  --wa-shadow: rgba(0, 0, 0, 0.22);
+  --wa-accent-text: #ffffff;
+  --wa-secondary-bg: rgba(255, 183, 3, 0.12);
+  --wa-secondary-border: rgba(255, 183, 3, 0.55);
+  --wa-secondary-text: #ffb703;
+  --wa-code-bg: rgba(33, 158, 188, 0.12);
+  --wa-dialog-bg: rgba(8, 63, 90, 0.96);
   color: var(--wa-ink);
   background: var(--wa-page);
   font-family:
@@ -24,6 +34,31 @@
     sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+html[data-theme="light"] {
+  --wa-ink: #023047;
+  --wa-ink-soft: #24556b;
+  --wa-ink-muted: #46758a;
+  --wa-page: #f4f9fc;
+  --wa-paper: #ffffff;
+  --wa-paper-warm: rgba(142, 202, 230, 0.08);
+  --wa-card: #ffffff;
+  --wa-card-strong: #ffffff;
+  --wa-line: rgba(2, 48, 71, 0.12);
+  --wa-line-soft: rgba(142, 202, 230, 0.18);
+  --wa-danger-bg: rgba(255, 183, 3, 0.12);
+  --wa-info-bg: rgba(142, 202, 230, 0.08);
+  --wa-heading: #023047;
+  --wa-topbar-bg: rgba(255, 255, 255, 0.92);
+  --wa-hover-bg: rgba(33, 158, 188, 0.1);
+  --wa-shadow: rgba(2, 48, 71, 0.08);
+  --wa-accent-text: #ffffff;
+  --wa-secondary-bg: rgba(255, 183, 3, 0.1);
+  --wa-secondary-border: rgba(255, 183, 3, 0.45);
+  --wa-secondary-text: #023047;
+  --wa-code-bg: rgba(142, 202, 230, 0.12);
+  --wa-dialog-bg: #ffffff;
 }
 
 * {
@@ -39,6 +74,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -64,7 +100,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--wa-line);
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--wa-topbar-bg);
   padding: 12px clamp(16px, 4vw, 32px);
   backdrop-filter: blur(16px);
 }
@@ -106,8 +142,8 @@ button:disabled {
 .icon-button:hover,
 .movie-actions button:hover,
 .history-item button:hover {
-  border-color: var(--wa-sea);
-  background: rgba(33, 158, 188, 0.12);
+  border-color: var(--wa-accent);
+  background: var(--wa-hover-bg);
 }
 
 .content {
@@ -133,7 +169,8 @@ button:disabled {
   border-radius: 8px;
   background: var(--wa-card);
   padding: clamp(16px, 2vw, 24px);
-  box-shadow: 0 10px 24px rgba(2, 48, 71, 0.08);
+  box-shadow: 0 18px 40px var(--wa-shadow);
+  backdrop-filter: blur(12px);
 }
 
 .status-strip {
@@ -158,7 +195,7 @@ button:disabled {
 }
 
 .status-strip.good {
-  border-color: var(--wa-accent);
+  border-color: var(--wa-sea);
 }
 
 .status-strip.bad {
@@ -175,6 +212,7 @@ button:disabled {
 .mood-panel label {
   font-size: 1.35rem;
   font-weight: 800;
+  color: var(--wa-heading);
 }
 
 .mood-toggle {
@@ -195,6 +233,10 @@ button:disabled {
   color: var(--wa-ink);
 }
 
+.mood-panel textarea::placeholder {
+  color: var(--wa-ink-muted);
+}
+
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -213,9 +255,9 @@ button:disabled {
 }
 
 .secondary-button {
-  border-color: var(--wa-sea);
-  background: rgba(33, 158, 188, 0.1);
-  color: var(--wa-ink);
+  border-color: var(--wa-secondary-border);
+  background: var(--wa-secondary-bg);
+  color: var(--wa-secondary-text);
 }
 
 .primary-button {
@@ -224,16 +266,25 @@ button:disabled {
   justify-content: center;
   gap: 8px;
   min-height: 44px;
-  border-color: var(--wa-accent-deep);
+  border-color: var(--wa-accent);
   background: var(--wa-accent);
-  color: #023047;
+  color: var(--wa-accent-text);
   font-weight: 800;
 }
 
+.primary-button:hover {
+  background: var(--wa-mustard);
+  border-color: var(--wa-mustard);
+}
+
 .danger-button {
-  border-color: var(--wa-accent-deep);
-  background: var(--wa-accent-deep);
-  color: #fffaf6;
+  border-color: var(--wa-mustard);
+  background: var(--wa-mustard);
+  color: #023047;
+}
+
+.cancel-job-button {
+  justify-self: start;
 }
 
 .timeline {
@@ -251,7 +302,7 @@ button:disabled {
 }
 
 .timeline li.done {
-  color: var(--wa-sea);
+  color: #ffb703;
 }
 
 .agent-status-list {
@@ -354,6 +405,7 @@ button:disabled {
 .history-list h1,
 .history-detail h2 {
   margin: 0 0 16px;
+  color: var(--wa-heading);
 }
 
 .result-section {
@@ -399,13 +451,13 @@ button:disabled {
 }
 
 .markdown-view a {
-  color: var(--wa-accent-deep);
+  color: #ffb703;
   font-weight: 700;
 }
 
 .markdown-view code {
   border-radius: 5px;
-  background: rgba(33, 158, 188, 0.12);
+  background: var(--wa-code-bg);
   padding: 2px 5px;
 }
 
@@ -431,8 +483,8 @@ button:disabled {
 }
 
 .movie-card.clickable:hover {
-  border-color: var(--wa-sea);
-  box-shadow: 0 10px 24px rgba(33, 158, 188, 0.16);
+  border-color: var(--wa-accent);
+  box-shadow: 0 12px 28px rgba(251, 133, 0, 0.18);
 }
 
 .poster-frame {
@@ -443,7 +495,7 @@ button:disabled {
   overflow: hidden;
   border-radius: 6px;
   background: var(--wa-accent);
-  color: #fffaf6;
+  color: #ffffff;
   font-size: 1.8rem;
   font-weight: 800;
 }
@@ -535,11 +587,91 @@ button:disabled {
 }
 
 .settings-row .ok {
-  color: var(--wa-sea);
+  color: #ffb703;
 }
 
 .settings-row .missing {
   color: var(--wa-accent-deep);
+}
+
+.config-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.config-form label,
+.config-wide-field {
+  display: grid;
+  gap: 7px;
+}
+
+.config-form label span,
+.config-fieldset legend {
+  color: var(--wa-heading);
+  font-weight: 800;
+}
+
+.config-form input,
+.config-form textarea {
+  width: 100%;
+  border: 1px solid var(--wa-line);
+  border-radius: 8px;
+  background: var(--wa-paper);
+  color: var(--wa-ink);
+  padding: 10px 12px;
+}
+
+.config-form textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.config-form input::placeholder,
+.config-form textarea::placeholder {
+  color: var(--wa-ink-muted);
+}
+
+.config-fieldset {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  border: 1px solid var(--wa-line-soft);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.segmented-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.segmented-control label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--wa-line);
+  border-radius: 8px;
+  background: var(--wa-paper);
+  padding: 8px 10px;
+}
+
+.config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.config-actions .primary-button,
+.config-actions .secondary-button {
+  min-width: 160px;
 }
 
 .section-header {
@@ -547,6 +679,13 @@ button:disabled {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+}
+
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .section-header h1 {
@@ -580,9 +719,9 @@ button:disabled {
 }
 
 .inline-toggle {
-  border: 1px solid var(--wa-sea);
+  border: 1px solid rgba(255, 183, 3, 0.45);
   border-radius: 8px;
-  background: rgba(33, 158, 188, 0.1);
+  background: rgba(255, 183, 3, 0.1);
   padding: 12px 14px;
 }
 
@@ -693,8 +832,9 @@ button:disabled {
 .dialog {
   width: min(440px, 100%);
   border-radius: 8px;
-  background: var(--wa-paper-warm);
+  background: var(--wa-dialog-bg);
   padding: 20px;
+  color: var(--wa-ink);
 }
 
 .dialog h2 {
@@ -738,7 +878,8 @@ button:disabled {
 
   .movie-card,
   .history-layout,
-  .taste-profile-grid {
+  .taste-profile-grid,
+  .config-grid {
     grid-template-columns: 1fr;
   }
 

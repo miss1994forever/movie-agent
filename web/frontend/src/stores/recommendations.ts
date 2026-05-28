@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
-import { createRecommendation, getRecommendation } from "../api/recommendations";
+import { listHistory } from "../api/history";
+import { cancelRecommendation, createRecommendation, getRecommendation } from "../api/recommendations";
 import { getBackendStatus } from "../api/status";
 import type { RecommendationJob } from "../api/types";
 
@@ -43,8 +44,11 @@ export const useRecommendationStore = defineStore("recommendations", {
       useSavedTasteProfile: saved.useSavedTasteProfile,
       restored: false,
       polling: false,
-    loading: false,
-    error: "",
+      pollingJobId: "",
+      pollToken: 0,
+      loading: false,
+      cancelling: false,
+      error: "",
     };
   },
   actions: {
@@ -65,15 +69,50 @@ export const useRecommendationStore = defineStore("recommendations", {
       this.draftMood = value;
       this.persist();
     },
+    clearStaleJob() {
+      this.pollToken += 1;
+      this.currentJobId = "";
+      if (this.current?.status === "queued" || this.current?.status === "running") {
+        this.current = null;
+      }
+      this.loading = false;
+      this.polling = false;
+      this.pollingJobId = "";
+      this.persist();
+    },
+    async loadLatestHistoryIfEmpty() {
+      if (this.current?.result_text || this.loading) return;
+      await this.loadLatestHistory();
+    },
+    async loadLatestHistory() {
+      try {
+        const history = await listHistory();
+        const latest = history.items.find((item) => item.result_text);
+        if (!latest) {
+          this.current = null;
+          this.currentJobId = "";
+          this.persist();
+          return;
+        }
+        this.current = latest;
+        this.currentJobId = latest.job_id || latest.id || "";
+        this.persist();
+      } catch {
+        // Latest-history recovery is optional; recommendation flow still works without it.
+      }
+    },
+    async handleHistoryDeleted(id: string) {
+      const currentId = this.current?.job_id || this.current?.id || this.currentJobId;
+      if (currentId !== id) return;
+      this.current = null;
+      this.currentJobId = "";
+      this.persist();
+      await this.loadLatestHistory();
+    },
     async restoreActiveJob() {
       if (this.restored) return;
       this.restored = true;
       this.error = "";
-
-      if (this.currentJobId) {
-        await this.pollJob(this.currentJobId);
-        return;
-      }
 
       try {
         const status = await getBackendStatus();
@@ -81,10 +120,20 @@ export const useRecommendationStore = defineStore("recommendations", {
           this.currentJobId = status.active_job_id;
           this.persist();
           await this.pollJob(status.active_job_id);
+          await this.loadLatestHistoryIfEmpty();
+          return;
         }
       } catch {
         // Status recovery is helpful, not required for normal use.
       }
+
+      if (this.currentJobId && isPending(this.current)) {
+        await this.pollJob(this.currentJobId);
+        await this.loadLatestHistoryIfEmpty();
+        return;
+      }
+
+      await this.loadLatestHistory();
     },
     async submitMood(mood: string) {
       this.loading = true;
@@ -100,30 +149,71 @@ export const useRecommendationStore = defineStore("recommendations", {
         this.loading = false;
       }
     },
+    async cancelCurrentJob() {
+      if (!this.currentJobId || !this.loading) return;
+      this.cancelling = true;
+      this.error = "";
+      try {
+        const job = await cancelRecommendation(this.currentJobId);
+        this.pollToken += 1;
+        this.current = null;
+        this.currentJobId = "";
+        this.loading = false;
+        this.polling = false;
+        this.pollingJobId = "";
+        if (job.status !== "cancelled") {
+          this.current = job;
+          this.currentJobId = job.job_id || "";
+        }
+        this.persist();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.cancelling = false;
+      }
+    },
     async pollJob(jobId: string) {
-      if (this.polling) return;
+      if (this.polling && this.pollingJobId === jobId) return;
+      const token = this.pollToken + 1;
+      this.pollToken = token;
       this.polling = true;
+      this.pollingJobId = jobId;
       this.loading = true;
       this.error = "";
       try {
         let job = await getRecommendation(jobId);
+        if (token !== this.pollToken) return;
         this.current = job;
         this.currentJobId = jobId;
         this.persist();
         while (isPending(job)) {
           await wait(1500);
+          if (token !== this.pollToken) return;
           job = await getRecommendation(jobId);
+          if (token !== this.pollToken) return;
           this.current = job;
           this.persist();
         }
         if (job.status === "failed") {
           this.error = job.error || "Recommendation failed.";
         }
+        if (!job.result_text) {
+          await this.loadLatestHistoryIfEmpty();
+        }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("Recommendation job not found")) {
+          this.clearStaleJob();
+          this.error = "";
+          return;
+        }
+        this.error = message;
       } finally {
-        this.loading = false;
-        this.polling = false;
+        if (token === this.pollToken) {
+          this.loading = false;
+          this.polling = false;
+          this.pollingJobId = "";
+        }
       }
     },
   },

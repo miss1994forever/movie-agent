@@ -57,6 +57,7 @@ def create_film_scouting_task(
     mood: str,
     watchlist_only_candidates: str | None = None,
     taste_task: Task | None = None,
+    saved_taste_profile: str | None = None,
 ) -> Task:
     """
     Task 2 — search for candidate films using the taste profile + user mood.
@@ -71,10 +72,17 @@ def create_film_scouting_task(
             f"{watchlist_only_candidates}"
         )
 
+    taste_context = "Using the taste profile from the previous task:\n\n"
+    if saved_taste_profile and not taste_task:
+        taste_context = (
+            "Using this saved long-term taste profile. Do not call user-context tools in this task:\n\n"
+            f"{saved_taste_profile}\n\n"
+        )
+
     return Task(
         description=(
             f"User's current mood: {mood}\n\n"
-            "Using the taste profile from the previous task:\n\n"
+            f"{taste_context}"
             "⚠️  HARD RULE: The taste profile contains a '[FILM SCOUT — HARD EXCLUDE]' line listing "
             "already-watched slugs. You MUST NOT include any film from that list in your shortlist, backup list, "
             "or tie-break recommendations unless the user explicitly asks for rewatches. Check every candidate's slug "
@@ -82,13 +90,14 @@ def create_film_scouting_task(
             "⚠️  SECOND RULE: The taste profile may contain a '[FILM SCOUT — LOW PRIORITY REWATCH]' line. "
             "Those films are not forbidden, but they should rank below unseen options and should almost never appear "
             "when stronger unseen candidates exist.\n\n"
-            "Steps for each candidate film:\n"
-            "1. Call `search_films` to discover candidates quickly. Treat the returned slug as a best-effort hint during exploration.\n"
-            "2. Only call `get_film` for the strongest finalists you are seriously considering keeping in the shortlist, "
-            "or when a title is ambiguous and you need to confirm the right slug. Do NOT verify every exploratory search result.\n"
-            "3. Cross-check each verified finalist slug against the exclusion list. Discard and pick "
+            "Tool-use budget and strategy:\n"
+            "1. Prefer your cinema knowledge first. For well-known films, estimate the likely Letterboxd slug and call `get_film` directly; `get_film` is the fast verification path.\n"
+            "2. Use `search_films` only for concrete film titles whose slug you cannot confidently estimate, not for broad style queries like 'French New Wave free spirit'.\n"
+            "3. Use at most 3 `search_films` calls. If a search returns no fast TMDB results, pick a concrete known title and verify it with `get_film` instead of repeatedly searching.\n"
+            "4. Use `get_film` for finalists you are seriously considering keeping in the shortlist, or when a title is ambiguous and you need to confirm the right slug.\n"
+            "5. Cross-check each verified finalist slug against the exclusion list. Discard and pick "
             "a different film if it matches.\n"
-            "4. Before producing the final shortlist, perform a final self-audit: every main pick and every backup pick must be unseen unless the user explicitly asked for rewatches. Do not ask the user to check the exclusion list for you.\n\n"
+            "6. Before producing the final shortlist, perform a final self-audit: every main pick and every backup pick must be unseen unless the user explicitly asked for rewatches. Do not ask the user to check the exclusion list for you.\n\n"
             "Aim for variety in the shortlist (e.g. mix of well-known and hidden gems), "
             "but every pick must be genuinely defensible given the taste brief."
             f"{constraint}"
@@ -108,9 +117,10 @@ def create_curation_task(
     agent,
     mood: str,
     timestamp: str,
-    taste_task: Task,
+    taste_task: Task | None,
     scouting_task: Task,
     human_input: bool = True,
+    saved_taste_profile: str | None = None,
 ) -> Task:
     """
     Task 3 — no tools; pure synthesis.
@@ -118,12 +128,21 @@ def create_curation_task(
     and writes emotionally resonant recommendations.
     human_input=True so the user can accept or redirect before account actions.
     """
+    taste_context = "  • A taste profile brief (from the Taste Analyst)\n"
+    if saved_taste_profile and not taste_task:
+        taste_context = (
+            "  • A saved long-term taste profile, used as the taste brief for this fast recommendation:\n"
+            f"{saved_taste_profile}\n"
+        )
+
+    context_tasks = [task for task in [taste_task, scouting_task] if task is not None]
+
     return Task(
         description=(
             f"Current time: {timestamp}\n"
             f"User mood: {mood}\n\n"
             "You have received:\n"
-            "  • A taste profile brief (from the Taste Analyst)\n"
+            f"{taste_context}"
             "  • A candidate shortlist with slugs (from the Film Scout)\n\n"
             "Your job: make the decisive final choice.\n"
             "Select 2 films by default, or 3 films if the shortlist supports it without lowering quality. "
@@ -133,6 +152,19 @@ def create_curation_task(
             "connect the film's core themes to the user's emotional state right now, "
             "reference something specific from their taste profile, "
             "and end with one sentence that makes them want to start watching immediately.\n\n"
+            "For the human-readable part, do NOT output only a short numbered list of titles. "
+            "Write the human-readable recommendation in English by default, including field labels and card reasons. "
+            "Use this exact markdown structure for every final film, with a blank line between sections:\n\n"
+            "Opening paragraph that explains the night's recommendation logic. Do not add a horizontal rule after it.\n\n"
+            "### 1. Original or English Title (Year, Country)\n"
+            "- **Runtime:** runtime in minutes\n"
+            "- **⭐ Average rating:** Letterboxd average rating when available\n"
+            "- **Slug:** `verified-letterboxd-slug`\n"
+            "- **Why it fits:**\n"
+            "  80+ English words explaining why this film fits the user's current mood and taste profile.\n\n"
+            "Repeat the same structure for film 2 and film 3 if present. "
+            "If runtime or rating is missing from the Scout shortlist, write `Unknown` instead of omitting the field. "
+            "Do not use markdown horizontal rules such as `---`, `***`, or `___` anywhere in the human-readable recommendation.\n\n"
             "At the very end, include one fenced JSON block that can be parsed by a web app. "
             "The JSON must have this exact shape:\n"
             "{\n"
@@ -151,16 +183,20 @@ def create_curation_task(
             "Do not put comments or trailing commas inside the JSON."
         ),
         expected_output=(
-            "2–3 final recommendations. Each must include:\n"
-            "• Chinese + English title, year, country, runtime, ⭐ avg rating\n"
-            "• slug: <letterboxd-slug>\n"
-            "• 推荐理由 (120+ chars): themes, why it fits the mood, "
-            "  a specific connection to the user's taste profile\n\n"
+            "2–3 final recommendations in detailed markdown. Each recommendation must use this format:\n"
+            "Opening paragraph without horizontal rules.\n\n"
+            "### N. Original or English title (year, country)\n"
+            "- **Runtime:** runtime in minutes or Unknown\n"
+            "- **⭐ Average rating:** rating/5 or Unknown\n"
+            "- **Slug:** `letterboxd-slug`\n"
+            "- **Why it fits:**\n"
+            "  80+ English words covering themes, why it fits the mood, and a specific connection to the user's taste profile.\n\n"
+            "Do not include `---`, `***`, or `___` separators.\n\n"
             "End with a fenced JSON block containing `recommendations`, where each item has "
             "`title`, `year`, `slug`, `director`, `reason`, and `letterboxd_url`."
         ),
         agent=agent,
-        context=[taste_task, scouting_task],
+        context=context_tasks,
         human_input=human_input,
     )
 

@@ -48,36 +48,45 @@ class MovieCrew:
         watchlist_only_candidates: str | None = None,
         status_callback: Callable[[str, str], None] | None = None,
         saved_taste_profile: str | None = None,
+        skip_live_taste_analysis: bool = False,
+        event_loop: Any | None = None,
     ):
         self.session = session
         self.mood = mood
         self.watchlist_only_candidates = watchlist_only_candidates
         self.status_callback = status_callback
         self.saved_taste_profile = saved_taste_profile
+        self.skip_live_taste_analysis = skip_live_taste_analysis
+        self.event_loop = event_loop
         self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Tool factories ────────────────────────────────────────────────────────
 
     def _context_tools(self) -> list:
         """Read-only: user profile only (Taste Analyst)."""
-        return [GetUserContextTool(session=self.session)]
+        return [GetUserContextTool(session=self.session, event_loop=self.event_loop)]
 
     def _search_tools(self) -> list:
         """Read-only: film search + detail lookup (Film Scout)."""
         return [
-            SearchFilmsTool(session=self.session),
-            GetFilmTool(session=self.session),
+            SearchFilmsTool(session=self.session, event_loop=self.event_loop, telemetry_callback=self._emit_tool_metric),
+            GetFilmTool(session=self.session, event_loop=self.event_loop, telemetry_callback=self._emit_tool_metric),
         ]
 
     def _write_tools(self) -> list:
         """Write operations (Account Manager)."""
         return [
-            AddToWatchlistTool(session=self.session),
-            AddToWatchedTool(session=self.session),
-            RateFilmTool(session=self.session),
-            ToggleLikeTool(session=self.session),
-            WriteReviewTool(session=self.session),
+            AddToWatchlistTool(session=self.session, event_loop=self.event_loop),
+            AddToWatchedTool(session=self.session, event_loop=self.event_loop),
+            RateFilmTool(session=self.session, event_loop=self.event_loop),
+            ToggleLikeTool(session=self.session, event_loop=self.event_loop),
+            WriteReviewTool(session=self.session, event_loop=self.event_loop),
         ]
+
+    def _emit_tool_metric(self, tool_name: str, target: str, elapsed: float, result_summary: str = "") -> None:
+        if self.status_callback:
+            suffix = f" | {result_summary}" if result_summary else ""
+            self.status_callback("tool_metric", f"{tool_name} | {elapsed:.2f}s | {target}{suffix}")
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -91,21 +100,26 @@ class MovieCrew:
 
     def _run(self, include_account_task: bool, human_input: bool) -> str:
         # Agents (each only sees the tools it actually needs)
-        analyst = create_taste_analyst_agent(self._context_tools())
         scout = create_film_scout_agent(self._search_tools())
         curator = create_curator_agent()
+        use_saved_profile_fast_path = bool(self.skip_live_taste_analysis and self.saved_taste_profile)
 
         # Tasks (context chain: each receives the outputs of prior tasks it depends on)
-        taste_task = create_taste_analysis_task(
-            agent=analyst,
-            timestamp=self.timestamp,
-            saved_taste_profile=self.saved_taste_profile,
-        )
+        analyst = None
+        taste_task = None
+        if not use_saved_profile_fast_path:
+            analyst = create_taste_analyst_agent(self._context_tools())
+            taste_task = create_taste_analysis_task(
+                agent=analyst,
+                timestamp=self.timestamp,
+                saved_taste_profile=self.saved_taste_profile,
+            )
         scouting_task = create_film_scouting_task(
             agent=scout,
             mood=self.mood,
             watchlist_only_candidates=self.watchlist_only_candidates,
             taste_task=taste_task,
+            saved_taste_profile=self.saved_taste_profile if use_saved_profile_fast_path else None,
         )
         curation_task = create_curation_task(
             agent=curator,
@@ -114,9 +128,10 @@ class MovieCrew:
             taste_task=taste_task,
             scouting_task=scouting_task,
             human_input=human_input,
+            saved_taste_profile=self.saved_taste_profile if use_saved_profile_fast_path else None,
         )
-        agents = [analyst, scout, curator]
-        tasks = [taste_task, scouting_task, curation_task]
+        agents = ([analyst] if analyst else []) + [scout, curator]
+        tasks = ([taste_task] if taste_task else []) + [scouting_task, curation_task]
 
         if include_account_task:
             account_mgr = create_account_agent(self._write_tools())
@@ -150,6 +165,8 @@ class MovieCrew:
                 emit("agent_step", f"{agent_name}: {step_text}")
 
         if task_agent_names:
+            if use_saved_profile_fast_path:
+                emit("agent_completed", "Personal Taste Analyst")
             emit("agent_running", task_agent_names[0])
 
         crew = Crew(

@@ -14,3 +14,7 @@ export async function createRecommendation(
 export async function getRecommendation(jobId: string): Promise<RecommendationJob> {
   return apiJson(`/api/recommendations/${jobId}`);
 }
+
+export async function cancelRecommendation(jobId: string): Promise<RecommendationJob> {
+  return apiJson(`/api/recommendations/${jobId}`, { method: "DELETE" });
+}

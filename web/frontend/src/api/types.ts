@@ -1,4 +1,4 @@
-export type JobStatus = "queued" | "running" | "succeeded" | "failed";
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface MovieRecommendation {
   title: string;
@@ -44,6 +44,21 @@ export interface AuthCheck {
   ok: boolean;
   username?: string | null;
   error?: string | null;
+  config: Record<string, boolean>;
+}
+
+export interface AppConfigUpdate {
+  dashscope_api_key?: string;
+  dashscope_base_url?: string;
+  ai_model?: string;
+  tmdb_api_key?: string;
+  letterboxd_username?: string;
+  letterboxd_password?: string;
+  letterboxd_credentials?: string;
+  letterboxd_cookie?: string;
+}
+
+export interface AppConfigResponse {
   config: Record<string, boolean>;
 }
 

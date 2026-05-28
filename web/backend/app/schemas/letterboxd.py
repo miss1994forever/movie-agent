@@ -10,6 +10,21 @@ class AuthCheckResponse(BaseModel):
     config: dict[str, bool]
 
 
+class AppConfigResponse(BaseModel):
+    config: dict[str, bool]
+
+
+class AppConfigUpdateRequest(BaseModel):
+    dashscope_api_key: str | None = None
+    dashscope_base_url: str | None = None
+    ai_model: str | None = None
+    tmdb_api_key: str | None = None
+    letterboxd_username: str | None = None
+    letterboxd_password: str | None = None
+    letterboxd_credentials: str | None = None
+    letterboxd_cookie: str | None = None
+
+
 class DeepAuthCheckResponse(BaseModel):
     ok: bool
     username: str | None = None

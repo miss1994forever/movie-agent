@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { Film, History, Settings, UserRoundSearch } from "lucide-vue-next";
+import { computed } from "vue";
+import { Film, History, Moon, Settings, Sun, UserRoundSearch } from "lucide-vue-next";
+import { useAppStore } from "../stores/app";
 
 defineProps<{
   active: "home" | "history" | "taste" | "settings";
@@ -8,6 +10,11 @@ defineProps<{
 const emit = defineEmits<{
   change: ["home" | "history" | "taste" | "settings"];
 }>();
+
+const app = useAppStore();
+const themeTitle = computed(() =>
+  app.theme === "dark" ? "Switch to light theme" : "Switch to dark theme",
+);
 </script>
 
 <template>
@@ -18,6 +25,10 @@ const emit = defineEmits<{
         <span>Movie Rec</span>
       </button>
       <nav class="nav">
+        <button type="button" :title="themeTitle" @click="app.toggleTheme">
+          <Sun v-if="app.theme === 'dark'" :size="19" />
+          <Moon v-else :size="19" />
+        </button>
         <button
           type="button"
           :class="{ active: active === 'home' }"

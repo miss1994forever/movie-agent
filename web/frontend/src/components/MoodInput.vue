@@ -12,10 +12,10 @@ const emit = defineEmits<{
 }>();
 
 const quickMoods = [
-  "想看轻松但有余味的电影",
-  "从 watchlist 里挑一部今晚适合看的",
-  "想看王家卫那种氛围，但不要太沉重",
-  "刚考完试，想看治愈一点的",
+  "Something light but lingering",
+  "Pick something from my watchlist for tonight",
+  "A Wong Kar-wai mood, but not too heavy",
+  "I just finished exams and want something healing",
 ];
 
 function submit() {
@@ -36,7 +36,7 @@ function updateMood(value: string) {
       id="mood"
       :value="modelValue"
       rows="5"
-      placeholder="比如：今天有点累，想看一部轻松、聪明、不要太长的电影"
+      placeholder="For example: I'm a little tired tonight and want something smart, light, and not too long."
       @input="updateMood(($event.target as HTMLTextAreaElement).value)"
       @keydown.meta.enter.prevent="submit"
       @keydown.ctrl.enter.prevent="submit"

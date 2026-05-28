@@ -88,6 +88,15 @@ onMounted(() => {
       :agents="result?.agent_statuses"
       :events="result?.events"
     />
+    <button
+      v-if="store.loading"
+      type="button"
+      class="secondary-button cancel-job-button"
+      :disabled="store.cancelling"
+      @click="store.cancelCurrentJob"
+    >
+      {{ store.cancelling ? "Cancelling..." : "Cancel Recommendation" }}
+    </button>
 
     <p v-if="store.error" class="error-banner">{{ store.error }}</p>
     <p v-if="actionMessage" class="info-banner">{{ actionMessage }}</p>

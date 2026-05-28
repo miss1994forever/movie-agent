@@ -19,29 +19,71 @@ function renderInline(value: string): string {
 }
 
 export function renderMarkdown(markdown: string): string {
-  const blocks = markdown.trim().split(/\n{2,}/);
-  return blocks
-    .map((block) => {
-      const lines = block.split("\n");
-      const first = lines[0] ?? "";
-      if (/^#{1,3}\s+/.test(first)) {
-        const level = Math.min(first.match(/^#+/)?.[0].length ?? 2, 3);
-        return `<h${level}>${renderInline(first.replace(/^#{1,3}\s+/, ""))}</h${level}>`;
+  const html: string[] = [];
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+  let orderedListStart = 1;
+  let listType: "ul" | "ol" | null = null;
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    html.push(`<p>${paragraph.map(renderInline).join("<br>")}</p>`);
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!listType || !listItems.length) return;
+    const items = listItems.map((item) => `<li>${renderInline(item)}</li>`).join("");
+    html.push(listType === "ol" ? `<ol${orderedListStart > 1 ? ` start="${orderedListStart}"` : ""}>${items}</ol>` : `<ul>${items}</ul>`);
+    listItems = [];
+    listType = null;
+    orderedListStart = 1;
+  }
+
+  for (const rawLine of markdown.trim().split("\n")) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(heading[1].length, 3);
+      html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const unordered = trimmed.match(/^[-*•]\s+(.+)$/);
+    if (unordered) {
+      flushParagraph();
+      if (listType !== "ul") flushList();
+      listType = "ul";
+      listItems.push(unordered[1]);
+      continue;
+    }
+
+    const ordered = trimmed.match(/^(\d+)[.)]\s+(.+)$/);
+    if (ordered) {
+      flushParagraph();
+      if (listType !== "ol") {
+        flushList();
+        orderedListStart = Number(ordered[1] || "1");
       }
-      if (lines.every((line) => /^[-*•]\s+/.test(line.trim()))) {
-        const items = lines
-          .map((line) => `<li>${renderInline(line.trim().replace(/^[-*•]\s+/, ""))}</li>`)
-          .join("");
-        return `<ul>${items}</ul>`;
-      }
-      if (lines.every((line) => /^\d+[.)]\s+/.test(line.trim()))) {
-        const firstNumber = Number(lines[0].trim().match(/^(\d+)/)?.[1] ?? "1");
-        const items = lines
-          .map((line) => `<li>${renderInline(line.trim().replace(/^\d+[.)]\s+/, ""))}</li>`)
-          .join("");
-        return `<ol${firstNumber > 1 ? ` start="${firstNumber}"` : ""}>${items}</ol>`;
-      }
-      return `<p>${lines.map(renderInline).join("<br>")}</p>`;
-    })
-    .join("");
+      listType = "ol";
+      listItems.push(ordered[2]);
+      continue;
+    }
+
+    flushList();
+    paragraph.push(trimmed);
+  }
+
+  flushParagraph();
+  flushList();
+  return html.join("");
 }

@@ -40,3 +40,9 @@ def get_status() -> dict[str, Any]:
         "last_error": _last_error,
         "events": list(_events),
     }
+
+
+def clear_events() -> None:
+    global _last_error
+    _events.clear()
+    _last_error = None

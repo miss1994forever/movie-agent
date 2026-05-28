@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-JobStatus = Literal["queued", "running", "succeeded", "failed"]
+JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
 
 class MovieRecommendation(BaseModel):

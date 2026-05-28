@@ -1,13 +1,17 @@
-# Movie Agent for Letterboxd
+# Movie Rec for Letterboxd
 
-Python CLI agent that connects to the local Letterboxd MCP server over SSE, reads your Letterboxd context, and uses crewAI plus DashScope/Qwen to recommend movies and sync account actions.
+Local movie recommendation assistant for Letterboxd. It includes a Python CLI agent and a personal FastAPI + Vue web app that read your Letterboxd context, use crewAI plus DashScope/Qwen to recommend films, and keep recommendation history locally.
 
 ## What Is Implemented
 
 - crewAI-based recommendation pipeline with four sequential agents: Taste Analyst, Film Scout, Chief Curator, and Account Manager.
 - Local Letterboxd MCP server over HTTP/SSE with browser-assisted fallbacks for protected account reads.
 - Read/write separation for Letterboxd tools, with explicit confirmation before every account mutation.
-- Search flow that prefers real Letterboxd slug resolution and verifies ambiguous titles with `get_film`.
+- Web UI with Home, History, Saved Taste Profile, and Settings pages.
+- Saved Taste Profile fast path: recommendations can reuse a stored profile instead of running live taste analysis every time.
+- Recommendation job status, cancellation, backend event log, and lightweight Film Scout tool telemetry.
+- Settings UI for checking and editing local `.env` configuration without exposing existing secret values to the browser.
+- Film lookup flow that prefers known Letterboxd slugs with `get_film`, uses cached TMDB-backed search when needed, and can optionally fall back to Letterboxd browser search.
 
 ## Project Structure
 
@@ -61,6 +65,8 @@ MCP_READY_TIMEOUT_SEC=20
 LETTERBOXD_MCP_URL=
 DEBUG_TRACEBACK=false
 CREW_VERBOSE=false
+TMDB_SEARCH_TIMEOUT_SECONDS=4
+MOVIE_REC_LETTERBOXD_SEARCH_FALLBACK=false
 ```
 
 ## Letterboxd Account Connection (Step by Step)
@@ -87,7 +93,7 @@ CREW_VERBOSE=false
    - `python run.py --check-auth`
 
 8. Wait for startup preflight message:
-   - `✅ Letterboxd 账号连通检查通过`
+   - `Letterboxd auth OK`
 9. If preflight fails, follow printed remediation and rerun.
 
 Validation behavior:
@@ -158,7 +164,7 @@ Notes:
 
 The web app is a local-first, single-user interface for the same recommendation
 pipeline. Keep secrets in the root `.env`; the browser only receives connection
-status and recommendation results.
+status, masked configuration state, and recommendation results.
 
 Start the backend API from the repository root:
 
@@ -186,10 +192,40 @@ Web behavior:
 
 1. `GET /api/auth/check` verifies Letterboxd connectivity.
 2. `POST /api/recommendations` starts a background recommendation job.
-3. The frontend polls the job until it succeeds or fails.
-4. Successful recommendations are saved to local SQLite at `web/backend/data/movie_rec.sqlite3`.
-5. Letterboxd write actions require an explicit confirmation dialog before the backend calls MCP write tools.
-6. The web recommendation flow is read-only until you click an action button; account sync is handled by the web UI, not by terminal prompts.
+3. The frontend polls the job until it succeeds, fails, or is cancelled.
+4. `DELETE /api/recommendations/{job_id}` cancels a tracked recommendation job.
+5. Successful recommendations are saved to local SQLite at `web/backend/data/movie_rec.sqlite3`.
+6. The Home page shows the latest saved recommendation and stays synced with History after deletes and backend restarts.
+7. Letterboxd write actions require an explicit confirmation dialog before the backend calls MCP write tools.
+8. The web recommendation flow is read-only until you click an action button; account sync is handled by the web UI, not by terminal prompts.
+
+Main pages:
+
+- Home: mood input, recommendation progress, Cancel Recommendation button, and latest recommendation.
+- History: saved recommendation records with clickable Letterboxd movie cards and poster enrichment.
+- Saved Taste Profile: refresh your long-term taste profile and choose whether future recommendations should reference it.
+- Settings: auth status, deep Letterboxd check, editable local configuration, backend status log, and Clear events button.
+
+The top navigation also includes a dark/light theme toggle.
+
+Settings configuration:
+
+- Click `Edit Configuration` before sensitive fields are shown.
+- Existing API keys, passwords, and cookies are not sent back to the browser.
+- Saving writes to the root `.env` and updates backend runtime settings where possible.
+- Restart the backend after changing provider keys, model settings, or credentials if a running process still behaves as if it has old values.
+
+Cancellation note:
+
+- The Cancel button marks the current tracked job as cancelled and prevents a cancelled result from being saved as a success.
+- crewAI work runs in a background worker thread, and Python cannot safely force-kill that thread from the UI. If a tool call or model call is already in progress, it may take a short time to wind down.
+- For a hard stop, stop the backend process with `Ctrl+C` and start it again.
+
+Backend status and telemetry:
+
+- `GET /api/status` returns recent backend events shown in Settings.
+- `DELETE /api/status/events` clears the in-memory status log.
+- Film Scout records lightweight tool metrics for `search_films` and `get_film`, including call counts and elapsed time. These appear in backend status events after a recommendation run.
 
 See `docs/WEB_IMPLEMENTATION_INSTRUCTIONS.md` for the detailed implementation plan and milestones.
 
@@ -199,6 +235,18 @@ See `docs/WEB_IMPLEMENTATION_INSTRUCTIONS.md` for the detailed implementation pl
 
 ```bash
 lsof -i :3000
+```
+
+- If the web backend port is occupied:
+
+```bash
+lsof -i :8000
+```
+
+Then stop the relevant backend process and restart:
+
+```bash
+uvicorn web.backend.app.main:app --reload --host 127.0.0.1 --port 8000 --loop asyncio
 ```
 
 - If Node dependencies are missing:
@@ -216,6 +264,17 @@ pip install -U mcp
 - If Letterboxd tools return login failure, verify `.env` credentials and try logging in once manually in browser.
 
 - If account reads fail after login, the MCP layer may be hitting a Letterboxd security challenge. Keep `LETTERBOXD_HEADLESS=false` and retry so the visible browser session can complete verification.
+
+- If Settings shows stale configuration after editing `.env`, restart the backend. Environment values are loaded by the Python process at startup, and some provider/client settings are safest to reload with a clean process.
+
+- If the Home page shows a stale running job or `Recommendation job not found` after a backend restart, clear the frontend recommendation cache in the browser console:
+
+```js
+localStorage.removeItem("movie-rec.recommendations");
+location.reload();
+```
+
+- If recommendation search feels slow, keep `TMDB_API_KEY` configured, leave `MOVIE_REC_LETTERBOXD_SEARCH_FALLBACK=false`, and prefer prompts that mention concrete films, directors, genres, periods, or countries. Film Scout is instructed to use `get_film` when it already has a likely slug and limit broad `search_films` calls.
 
 - If you only want to test recommendation flow without account reads, set:
 

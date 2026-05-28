@@ -5,6 +5,14 @@ import { createTasteProfileRefresh, getTasteProfile, getTasteProfileRefreshJob }
 import type { TasteProfile } from "../api/types";
 import MarkdownView from "./MarkdownView.vue";
 
+defineProps<{
+  useProfile: boolean;
+}>();
+
+const emit = defineEmits<{
+  "update:useProfile": [boolean];
+}>();
+
 const profile = ref<TasteProfile | null>(null);
 const loading = ref(false);
 const error = ref("");
@@ -62,6 +70,14 @@ onMounted(loadProfile);
         <RefreshCcw :size="18" />
       </button>
     </header>
+    <label class="toggle-row">
+      <input
+        type="checkbox"
+        :checked="useProfile"
+        @change="emit('update:useProfile', ($event.target as HTMLInputElement).checked)"
+      />
+      <span>Use saved taste profile for recommendations</span>
+    </label>
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-else-if="loading" class="info-banner">
       Refreshing from Letterboxd...

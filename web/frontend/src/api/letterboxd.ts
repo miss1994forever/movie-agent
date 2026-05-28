@@ -1,5 +1,5 @@
 import { apiJson } from "./client";
-import type { AuthCheck, DeepAuthCheck } from "./types";
+import type { AppConfigResponse, AppConfigUpdate, AuthCheck, DeepAuthCheck } from "./types";
 
 export async function checkAuth(): Promise<AuthCheck> {
   return apiJson("/api/auth/check");
@@ -7,6 +7,13 @@ export async function checkAuth(): Promise<AuthCheck> {
 
 export async function deepCheckAuth(): Promise<DeepAuthCheck> {
   return apiJson("/api/auth/deep-check");
+}
+
+export async function updateAppConfig(config: AppConfigUpdate): Promise<AppConfigResponse> {
+  return apiJson("/api/auth/config", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
 }
 
 export async function addToWatchlist(slug: string, remove = false) {

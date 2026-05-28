@@ -9,7 +9,8 @@ import asyncio
 import json
 import os
 import re
-from typing import Any, Type
+import time
+from typing import Any, Callable, Type
 
 import nest_asyncio
 from crewai.tools import BaseTool
@@ -22,12 +23,30 @@ nest_asyncio.apply()
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
-def _call(session: Any, tool_name: str, args: dict) -> dict:
+_SEARCH_FILMS_CACHE: dict[tuple[str, str | None, bool], str] = {}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+def _call(session: Any, tool_name: str, args: dict, event_loop: Any | None = None) -> dict:
     """Blocking wrapper: run an async MCP tool call in the current event loop."""
-    loop = asyncio.get_event_loop()
-    result = loop.run_until_complete(
-        asyncio.wait_for(session.call_tool(tool_name, arguments=args), timeout=90)
-    )
+    coroutine = asyncio.wait_for(session.call_tool(tool_name, arguments=args), timeout=90)
+    if event_loop is not None and event_loop.is_running():
+        result = asyncio.run_coroutine_threadsafe(coroutine, event_loop).result(timeout=95)
+    else:
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(coroutine)
     return extract_json(result)
 
 
@@ -103,6 +122,7 @@ class GetUserContextTool(BaseTool):
     )
     args_schema: Type[BaseModel] = GetUserContextInput
     session: Any
+    event_loop: Any | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -120,7 +140,7 @@ class GetUserContextTool(BaseTool):
         has_diary = False
 
         try:
-            snapshot = _call(self.session, "get_member_snapshot", {"username": resolved_username or "me"})
+            snapshot = _call(self.session, "get_member_snapshot", {"username": resolved_username or "me"}, self.event_loop)
             if snapshot.get("username"):
                 resolved_username = _clean_username(snapshot["username"])
                 lines.append(f"User: @{resolved_username}")
@@ -173,7 +193,7 @@ class GetUserContextTool(BaseTool):
         # Who is logged in
         if not has_user_line:
             try:
-                user = _call(self.session, "get_current_user", {"tryLogin": False})
+                user = _call(self.session, "get_current_user", {"tryLogin": False}, self.event_loop)
                 if user.get("username"):
                     resolved_username = _clean_username(user["username"])
                     lines.append(f"User: @{resolved_username}")
@@ -187,7 +207,7 @@ class GetUserContextTool(BaseTool):
         # Pinned / favorite films (highest priority for preference inference)
         if not has_favourites:
             try:
-                data = _call(self.session, "get_member_pinned", {"username": resolved_username})
+                data = _call(self.session, "get_member_pinned", {"username": resolved_username}, self.event_loop)
                 films = (data.get("items") or data.get("films") or [])[:8]
                 if films:
                     titles = [f"{f.get('title', '?')} ({f.get('year', '')})" for f in films]
@@ -200,7 +220,7 @@ class GetUserContextTool(BaseTool):
         # Highly-rated films from the ratings page (best available proxy for "liked" films)
         if not has_ratings:
             try:
-                data = _call(self.session, "get_member_ratings", {"username": resolved_username, "maxPages": 2})
+                data = _call(self.session, "get_member_ratings", {"username": resolved_username, "maxPages": 2}, self.event_loop)
                 films = data.get("items") or data.get("films") or []
                 top_rated = [f for f in films if _parse_rating(f.get("rating")) >= 4.0][:8]
                 if top_rated:
@@ -215,7 +235,7 @@ class GetUserContextTool(BaseTool):
         # Watched films log — collect recently watched for exclusion and taste signals
         if not has_recent:
             try:
-                data = _call(self.session, "get_member_films", {"username": resolved_username, "maxPages": 2})
+                data = _call(self.session, "get_member_films", {"username": resolved_username, "maxPages": 2}, self.event_loop)
                 films = data.get("items") or data.get("films") or []
                 recent = films[:10]
                 if recent:
@@ -228,7 +248,7 @@ class GetUserContextTool(BaseTool):
         # Watchlist — aspirational taste reference
         if not has_watchlist:
             try:
-                data = _call(self.session, "get_member_watchlist", {"username": resolved_username, "maxPages": 1})
+                data = _call(self.session, "get_member_watchlist", {"username": resolved_username, "maxPages": 1}, self.event_loop)
                 films = (data.get("items") or data.get("films") or [])[:10]
                 if films:
                     titles = [f.get("title", f.get("slug", "?")) for f in films]
@@ -239,7 +259,7 @@ class GetUserContextTool(BaseTool):
         # Diary — recent viewing dates context
         if not has_diary:
             try:
-                data = _call(self.session, "get_member_diary", {"username": resolved_username, "maxPages": 1})
+                data = _call(self.session, "get_member_diary", {"username": resolved_username, "maxPages": 1}, self.event_loop)
                 entries = (data.get("items") or [])[:5]
                 if entries:
                     items = [f"{e.get('title', '?')} ({e.get('date', e.get('watchedDate', '?'))})" for e in entries]
@@ -278,29 +298,60 @@ class SearchFilmsInput(BaseModel):
 
 
 class SearchFilmsTool(BaseTool):
-    """Search for films via TMDB API (falls back to Letterboxd search if TMDB key absent)."""
+    """Search for films via TMDB API, with optional Letterboxd search fallback."""
 
     name: str = "search_films"
     description: str = (
-        "Search for films quickly. Uses TMDB first when available for discovery metadata and falls back "
-        "to Letterboxd search when needed. Returned slugs are best-effort hints; verify finalists with get_film before write operations."
+        "Search for concrete film titles quickly. Uses TMDB first for discovery metadata. "
+        "Returned slugs are best-effort hints; prefer get_film for known or finalist slugs."
     )
     args_schema: Type[BaseModel] = SearchFilmsInput
     session: Any
+    event_loop: Any | None = None
+    telemetry_callback: Callable[[str, str, float, str], None] | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
     def _run(self, query: str) -> str:
+        started = time.perf_counter()
         title_query, release_year = _extract_query_title_and_year(query)
-        api_key = os.getenv("TMDB_API_KEY", "")
-        if api_key:
-            result = self._tmdb_search(title_query, api_key, preferred_year=release_year)
-            if result:
+        api_key = os.getenv("TMDB_API_KEY", "").strip()
+        cache_key = (title_query.lower(), release_year, bool(api_key))
+        cache_hit = cache_key in _SEARCH_FILMS_CACHE
+        try:
+            if cache_hit:
+                result = _SEARCH_FILMS_CACHE[cache_key]
                 return result
-        letterboxd_result = self._letterboxd_search(query, preferred_year=release_year)
-        if letterboxd_result:
-            return letterboxd_result
-        return f"No results found for '{query}'. Letterboxd search may be blocked or returned an empty page."
+
+            if api_key:
+                result = self._tmdb_search(title_query, api_key, preferred_year=release_year)
+                if result:
+                    _SEARCH_FILMS_CACHE[cache_key] = result
+                    return result
+
+                if not _env_flag("MOVIE_REC_LETTERBOXD_SEARCH_FALLBACK", default=False):
+                    result = (
+                        f"No fast TMDB results found for '{query}'. "
+                        "Try a concrete known film title, or estimate a likely Letterboxd slug and call get_film."
+                    )
+                    _SEARCH_FILMS_CACHE[cache_key] = result
+                    return result
+
+            letterboxd_result = self._letterboxd_search(query, preferred_year=release_year)
+            if letterboxd_result:
+                _SEARCH_FILMS_CACHE[cache_key] = letterboxd_result
+                return letterboxd_result
+            result = f"No results found for '{query}'."
+            _SEARCH_FILMS_CACHE[cache_key] = result
+            return result
+        finally:
+            elapsed = time.perf_counter() - started
+            status = "cache" if cache_hit else "query"
+            self._emit_telemetry("search_films", f"{status}: {query}", elapsed)
+
+    def _emit_telemetry(self, tool_name: str, target: str, elapsed: float) -> None:
+        if self.telemetry_callback:
+            self.telemetry_callback(tool_name, target, elapsed, "")
 
     def _tmdb_search(self, query: str, api_key: str, preferred_year: str | None = None) -> str:
         import httpx
@@ -313,7 +364,7 @@ class SearchFilmsTool(BaseTool):
                     "include_adult": "false",
                     **({"primary_release_year": preferred_year} if preferred_year else {}),
                 },
-                timeout=10,
+                timeout=_env_float("TMDB_SEARCH_TIMEOUT_SECONDS", 4.0),
             )
             resp.raise_for_status()
             results = resp.json().get("results", [])[:5]
@@ -362,7 +413,7 @@ class SearchFilmsTool(BaseTool):
         last_error = ""
         for q in candidates:
             try:
-                data = _call(self.session, "search", {"query": q, "type": "films", "maxPages": 1})
+                data = _call(self.session, "search", {"query": q, "type": "films", "maxPages": 1}, self.event_loop)
             except Exception as exc:
                 last_error = str(exc)
                 continue
@@ -405,24 +456,33 @@ class GetFilmTool(BaseTool):
     )
     args_schema: Type[BaseModel] = GetFilmInput
     session: Any
+    event_loop: Any | None = None
+    telemetry_callback: Callable[[str, str, float, str], None] | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
     def _run(self, slug: str) -> str:
-        data = _call(self.session, "get_film", {"slug": slug})
-        if not data:
-            return f"Film '{slug}' not found."
-        # Return a focused subset to keep context short.
-        # Keys from letterboxd.js getFilm(): title, year, director, runtime, genre, rating, synopsis
-        keys = ["title", "year", "director", "runtime", "genre", "rating", "synopsis"]
-        summary = {k: data[k] for k in keys if k in data}
-        return _truncate(summary)
+        started = time.perf_counter()
+        try:
+            data = _call(self.session, "get_film", {"slug": slug}, self.event_loop)
+            if not data:
+                return f"Film '{slug}' not found."
+            # Return a focused subset to keep context short.
+            # Keys from letterboxd.js getFilm(): title, year, director, runtime, genre, rating, synopsis
+            keys = ["title", "year", "director", "runtime", "genre", "rating", "synopsis"]
+            summary = {k: data[k] for k in keys if k in data}
+            return _truncate(summary)
+        finally:
+            elapsed = time.perf_counter() - started
+            if self.telemetry_callback:
+                self.telemetry_callback("get_film", slug, elapsed, "")
 
 
 # ── Write tools (always ask for confirmation) ─────────────────────────────────
 
 class _WriteBase(BaseTool):
     session: Any
+    event_loop: Any | None = None
     model_config = {"arbitrary_types_allowed": True}
 
     def _confirmed_call(self, tool_name: str, args: dict) -> str:
@@ -434,7 +494,7 @@ class _WriteBase(BaseTool):
             return "Cancelled."
         if choice not in {"y", "yes"}:
             return "Cancelled by user."
-        result = _call(self.session, tool_name, args)
+        result = _call(self.session, tool_name, args, self.event_loop)
         if isinstance(result, dict) and result.get("success"):
             return f"✅ {tool_name} succeeded."
         return f"Result: {result}"
