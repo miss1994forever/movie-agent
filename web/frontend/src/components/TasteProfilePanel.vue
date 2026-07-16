@@ -4,6 +4,9 @@ import { RefreshCcw } from "lucide-vue-next";
 import { createTasteProfileRefresh, getTasteProfile, getTasteProfileRefreshJob } from "../api/tasteProfile";
 import type { TasteProfile } from "../api/types";
 import MarkdownView from "./MarkdownView.vue";
+import { useAppStore } from "../stores/app";
+
+const app = useAppStore();
 
 defineProps<{
   useProfile: boolean;
@@ -80,7 +83,7 @@ onMounted(loadProfile);
     </label>
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-else-if="loading" class="info-banner">
-      Refreshing from Letterboxd...
+      {{ app.isDemoMode ? "Loading fictional demo profile..." : "Refreshing from Letterboxd..." }}
       <span v-if="stage">({{ stage }})</span>
     </p>
     <p v-else-if="!profile" class="empty-state">

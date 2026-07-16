@@ -13,6 +13,10 @@ dist/
 build/
 *.tsbuildinfo
 web/backend/data/
+.movie-rec-letterboxd/
+.movie-rec-letterboxd-profile/
+profile-snapshots.json
+*letterboxd-profile*.html
 
 # 忽略 Node.js 依赖
 node_modules/

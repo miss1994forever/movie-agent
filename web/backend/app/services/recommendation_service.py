@@ -7,13 +7,12 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from ..core.settings import get_external_mcp_url
+from ..core.settings import can_read_letterboxd, get_external_mcp_url, is_demo_mode
 
 import httpx
 
 from movie_rec.cli.cli import detect_watchlist_only
 from movie_rec.core.mcp_manager import extract_json, mcp_session, preflight_check
-from movie_rec.crews.movie_crew import MovieCrew
 
 from ..schemas.history import HistoryItem
 from ..schemas.recommendation import (
@@ -308,10 +307,11 @@ async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
         record_event("Recommendation job started.", job_id=job_id)
 
         try:
-            result_text = await _run_recommendation(job.mood, job_id, use_saved_taste_profile)
+            result_text = await _run_recommendation_with_retry(job.mood, job_id, use_saved_taste_profile)
             _update_job_stage(job_id, "parsing_results")
             movies = _extract_movies(result_text)
-            movies = await _enrich_movie_posters(movies)
+            if not is_demo_mode():
+                movies = await _enrich_movie_posters(movies)
             display_text = _clean_display_text(result_text)
             finished = _now()
             latest_job = _jobs.get(job_id, job)
@@ -374,6 +374,14 @@ async def _run_job(job_id: str, use_saved_taste_profile: bool) -> None:
 
 
 async def _run_recommendation(mood: str, job_id: str, use_saved_taste_profile: bool) -> str:
+    if is_demo_mode():
+        return await _run_demo_recommendation(mood, job_id)
+    if not can_read_letterboxd():
+        raise RuntimeError("Letterboxd reads are disabled and no demo provider is active.")
+
+    # Keep the portfolio demo independent from crewAI and its provider startup.
+    from movie_rec.crews.movie_crew import MovieCrew
+
     external_url = get_external_mcp_url()
     event_loop = asyncio.get_running_loop()
     async with mcp_session(external_url) as session:
@@ -417,6 +425,133 @@ async def _run_recommendation(mood: str, job_id: str, use_saved_taste_profile: b
         _update_job_stage(job_id, "running_crewai")
         record_event("Starting crewAI recommendation pipeline.")
         return await asyncio.to_thread(crew.run_recommendation_only)
+
+
+async def _run_recommendation_with_retry(
+    mood: str,
+    job_id: str,
+    use_saved_taste_profile: bool,
+) -> str:
+    """Retry only transient failures; never retry authentication or validation errors."""
+    try:
+        configured_attempts = int(os.getenv("RECOMMENDATION_MAX_ATTEMPTS", "2"))
+    except ValueError:
+        configured_attempts = 2
+    max_attempts = min(3, max(1, configured_attempts))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await _run_recommendation(mood, job_id, use_saved_taste_profile)
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_exception(exc):
+                raise
+            delay = 0.75 * (2 ** (attempt - 1))
+            record_event(
+                f"Transient recommendation failure; retrying in {delay:.2f}s "
+                f"(attempt {attempt + 1}/{max_attempts}).",
+                level="warning",
+                job_id=job_id,
+            )
+            _update_job_stage(job_id, "retrying")
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("Recommendation retry loop ended unexpectedly.")
+
+
+def _is_retryable_exception(exc: BaseException) -> bool:
+    text = _flatten_exception(exc).lower()
+    non_retryable = (
+        "invalid access token",
+        "token expired",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "invalid api key",
+        "validation",
+        "disabled by server policy",
+    )
+    if any(marker in text for marker in non_retryable):
+        return False
+    retryable = (
+        "timeout",
+        "timed out",
+        "connection",
+        "temporarily unavailable",
+        "rate limit",
+        "status 429",
+        "status 500",
+        "status 502",
+        "status 503",
+        "status 504",
+    )
+    return isinstance(exc, (asyncio.TimeoutError, httpx.TransportError)) or any(
+        marker in text for marker in retryable
+    )
+
+
+async def _run_demo_recommendation(mood: str, job_id: str) -> str:
+    """Return a deterministic portfolio demo without external accounts or paid APIs."""
+    from movie_rec.providers.demo import DemoTasteDataProvider
+
+    provider = DemoTasteDataProvider()
+    _update_job_stage(job_id, "loading_demo_profile")
+    _update_agent_status(job_id, "agent_running", "Personal Taste Analyst")
+    await asyncio.sleep(0)
+    _update_agent_status(job_id, "agent_step", f"Personal Taste Analyst: using {provider.source} sample data")
+    _update_agent_status(job_id, "agent_completed", "Personal Taste Analyst")
+
+    _update_job_stage(job_id, "selecting_demo_films")
+    _update_agent_status(job_id, "agent_running", "Film Scout")
+    movies = provider.recommend(mood)
+    _update_agent_status(job_id, "agent_step", "Film Scout: selected films from the curated demo catalog")
+    _update_agent_status(job_id, "agent_completed", "Film Scout")
+
+    _update_agent_status(job_id, "agent_running", "Chief Curator")
+    context = provider.context_text()
+    recommendation_items = []
+    sections = [
+        "## Portfolio Demo Recommendation",
+        "",
+        "This result uses fictional sample taste data. No Letterboxd account, scraper, browser session, or paid AI API was used.",
+        "",
+    ]
+    for movie in movies:
+        themes = ", ".join(movie.themes)
+        reason = f"A {themes} choice that fits the mood: {mood.strip() or 'open to something thoughtful'}."
+        sections.extend(
+            [
+                f"### {movie.title} ({movie.year})",
+                "",
+                f"Directed by {movie.director}. {reason}",
+                "",
+            ]
+        )
+        recommendation_items.append(
+            {
+                "title": movie.title,
+                "year": movie.year,
+                "slug": movie.slug,
+                "director": movie.director,
+                "reason": reason,
+                "letterboxd_url": f"https://letterboxd.com/film/{movie.slug}/",
+            }
+        )
+    sections.extend(
+        [
+            "<details><summary>Demo profile evidence</summary>",
+            "",
+            context,
+            "",
+            "</details>",
+            "",
+            "```json",
+            json.dumps({"recommendations": recommendation_items}, ensure_ascii=False),
+            "```",
+        ]
+    )
+    _update_agent_status(job_id, "agent_completed", "Chief Curator")
+    record_event("Generated a deterministic recommendation from fictional demo data.", job_id=job_id)
+    return "\n".join(sections)
 
 
 def _format_exception(exc: BaseException) -> str:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ..core.settings import public_config_status, update_env_config
+from ..core.settings import can_read_letterboxd, can_write_config, is_demo_mode, public_config_status, update_env_config
 from ..schemas.letterboxd import (
     AppConfigResponse,
     AppConfigUpdateRequest,
@@ -17,6 +17,15 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.get("/check", response_model=AuthCheckResponse)
 async def auth_check() -> AuthCheckResponse:
+    if is_demo_mode():
+        return AuthCheckResponse(ok=True, username=None, error=None, config=public_config_status())
+    if not can_read_letterboxd():
+        return AuthCheckResponse(
+            ok=False,
+            username=None,
+            error="Letterboxd access is disabled by server policy.",
+            config=public_config_status(),
+        )
     try:
         ok, username, error = await check_auth()
     except Exception as exc:
@@ -36,6 +45,10 @@ async def get_config() -> AppConfigResponse:
 
 @router.post("/config", response_model=AppConfigResponse)
 async def update_config(request: AppConfigUpdateRequest) -> AppConfigResponse:
+    if not can_write_config():
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Runtime configuration changes are disabled.")
     payload = request.model_dump(exclude_unset=True)
     env_values = {
         "DASHSCOPE_API_KEY": payload.get("dashscope_api_key"),
@@ -53,6 +66,16 @@ async def update_config(request: AppConfigUpdateRequest) -> AppConfigResponse:
 
 @router.get("/deep-check", response_model=DeepAuthCheckResponse)
 async def auth_deep_check() -> DeepAuthCheckResponse:
+    if is_demo_mode():
+        return DeepAuthCheckResponse(
+            ok=True,
+            logged_in=False,
+            profile_read_ok=True,
+            watchlist_read_ok=True,
+            warnings=["Demo mode uses fictional sample data and does not connect to Letterboxd."],
+        )
+    if not can_read_letterboxd():
+        return DeepAuthCheckResponse(ok=False, error="Letterboxd access is disabled by server policy.")
     try:
         return DeepAuthCheckResponse.model_validate(await deep_check_auth())
     except Exception as exc:

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import aiosqlite
 
-from ..core.settings import DATABASE_PATH, WEB_DATA_DIR
+from ..core.settings import WEB_DATA_DIR, get_database_path
 
 
 async def connect() -> aiosqlite.Connection:
     WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    db = await aiosqlite.connect(DATABASE_PATH)
+    db = await aiosqlite.connect(get_database_path())
     db.row_factory = aiosqlite.Row
     return db
 

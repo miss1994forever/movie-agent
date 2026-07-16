@@ -10,13 +10,44 @@ from dotenv import load_dotenv, set_key
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 SRC_PATH = PROJECT_ROOT / "src"
 WEB_DATA_DIR = PROJECT_ROOT / "web" / "backend" / "data"
-DATABASE_PATH = WEB_DATA_DIR / "movie_rec.sqlite3"
 ENV_PATH = PROJECT_ROOT / ".env"
 
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 load_dotenv(ENV_PATH, override=True)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_demo_mode() -> bool:
+    return _env_flag("MOVIE_REC_DEMO_MODE", default=False)
+
+
+def get_database_path() -> Path:
+    filename = "movie_rec_demo.sqlite3" if is_demo_mode() else "movie_rec.sqlite3"
+    return WEB_DATA_DIR / filename
+
+
+# Backward-compatible local path for scripts that import the constant directly.
+DATABASE_PATH = WEB_DATA_DIR / "movie_rec.sqlite3"
+
+
+def can_write_config() -> bool:
+    return not is_demo_mode() and _env_flag("MOVIE_REC_ALLOW_CONFIG_WRITE", default=True)
+
+
+def can_read_letterboxd() -> bool:
+    return not is_demo_mode() and _env_flag("MOVIE_REC_ALLOW_LETTERBOXD_READ", default=True)
+
+
+def can_write_letterboxd() -> bool:
+    return can_read_letterboxd() and _env_flag("MOVIE_REC_ALLOW_LETTERBOXD_WRITE", default=True)
 
 
 def get_external_mcp_url() -> str | None:
@@ -35,6 +66,10 @@ def public_config_status() -> dict[str, bool]:
         "dashscope_api_key": bool(os.getenv("DASHSCOPE_API_KEY", "").strip()),
         "tmdb_api_key": bool(os.getenv("TMDB_API_KEY", "").strip()),
         "letterboxd_configured": has_username_password or has_credentials or has_cookie,
+        "demo_mode": is_demo_mode(),
+        "config_write_enabled": can_write_config(),
+        "letterboxd_read_enabled": can_read_letterboxd(),
+        "letterboxd_write_enabled": can_write_letterboxd(),
     }
 
 

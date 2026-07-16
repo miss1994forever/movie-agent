@@ -1,6 +1,43 @@
-# Movie Rec for Letterboxd
+# Movie Rec
 
-Local movie recommendation assistant for Letterboxd. It includes a Python CLI agent and a personal FastAPI + Vue web app that read your Letterboxd context, use crewAI plus DashScope/Qwen to recommend films, and keep recommendation history locally.
+A local-first movie recommendation prototype that combines viewing-history context with a user's current mood. The project includes a FastAPI + Vue web application, a crewAI/Qwen recommendation pipeline, local history and taste-profile storage, and a deterministic portfolio demo that needs no account or paid API.
+
+> **Project status:** personal, experimental prototype. Public/demo mode uses fictional sample data and cannot read or modify a Letterboxd account. The legacy Letterboxd integration is retained for local research only; it uses unofficial browser automation and must not be exposed as a public service.
+
+This repository is an independently developed, unofficial project and is not affiliated with or endorsed by Letterboxd. Letterboxd names and marks belong to their respective owner.
+
+Original project code is available under the [MIT License](LICENSE). Third-party names, data and assets are covered separately in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Why This Project Exists
+
+Most recommendation interfaces optimize for broad popularity. This prototype explores a more inspectable flow: normalize a viewer's taste evidence, combine it with a short mood description, let agents separate analysis from candidate research and curation, then preserve the result locally.
+
+The main engineering decisions are:
+
+- separate taste-data providers from recommendation orchestration so a safe demo does not need live account access;
+- enforce read, write, and configuration capabilities on the backend instead of trusting hidden UI controls;
+- distinguish a deterministic portfolio demo from the network-dependent local agent workflow;
+- make partial results, cancellation, tool timing, history, and failure states visible in the interface.
+
+## Safe Portfolio Demo
+
+The demo uses a fictional taste profile and a curated film catalog. It does not start Playwright or MCP and does not call Letterboxd, TMDB, or DashScope.
+
+```bash
+cp config/.env.example .env
+pip install -r web/backend/requirements.txt -r requirements.txt
+uvicorn web.backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+In another terminal:
+
+```bash
+cd web/frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The status strip should say `Portfolio demo · fictional sample data`.
 
 ## What Is Implemented
 
@@ -12,6 +49,8 @@ Local movie recommendation assistant for Letterboxd. It includes a Python CLI ag
 - Recommendation job status, cancellation, backend event log, and lightweight Film Scout tool telemetry.
 - Settings UI for checking and editing local `.env` configuration without exposing existing secret values to the browser.
 - Film lookup flow that prefers known Letterboxd slugs with `get_film`, uses cached TMDB-backed search when needed, and can optionally fall back to Letterboxd browser search.
+- Portfolio-safe demo provider with backend-enforced capability switches.
+- Bounded frontend request timeouts/retries and expiring positive/negative film-search caches.
 
 ## Project Structure
 
@@ -48,28 +87,20 @@ Create a `.env` file in project root (copy from template):
 cp config/.env.example .env
 ```
 
-Then edit `.env` with your credentials:
+The checked-in template defaults to portfolio-safe demo mode:
 
 ```env
-DASHSCOPE_API_KEY=your_dashscope_key
-AI_MODEL=qwen-max
-LETTERBOXD_USERNAME=your_letterboxd_username
-LETTERBOXD_PASSWORD=your_letterboxd_password
-TMDB_API_KEY=your_tmdb_key
-
-# Optional
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-PORT=3000
-MCP_INIT_TIMEOUT_SEC=30
-MCP_READY_TIMEOUT_SEC=20
-LETTERBOXD_MCP_URL=
-DEBUG_TRACEBACK=false
-CREW_VERBOSE=false
-TMDB_SEARCH_TIMEOUT_SECONDS=4
-MOVIE_REC_LETTERBOXD_SEARCH_FALLBACK=false
+MOVIE_REC_DEMO_MODE=true
+MOVIE_REC_ALLOW_CONFIG_WRITE=false
+MOVIE_REC_ALLOW_LETTERBOXD_READ=false
+MOVIE_REC_ALLOW_LETTERBOXD_WRITE=false
 ```
 
+Only configure model keys or Letterboxd credentials for private local development. Never place them in a public deployment or browser bundle.
+
 ## Letterboxd Account Connection (Step by Step)
+
+> Local development only. This path is not required for the portfolio demo and is not an authorized public Letterboxd API integration.
 
 1. Optional but recommended: run setup wizard first
    - `python scripts/setup_cookie_login.py` or `python run.py --setup`
@@ -79,7 +110,7 @@ MOVIE_REC_LETTERBOXD_SEARCH_FALLBACK=false
 2. Open your Letterboxd profile in browser and confirm your username slug (for example `june` in `https://letterboxd.com/june/`).
    - Agent now validates this at startup and rejects email-style usernames.
 3. In `.env`, set one credential mode:
-   - Mode A (recommended): `LETTERBOXD_USERNAME` + `LETTERBOXD_PASSWORD`
+   - Mode A: `LETTERBOXD_USERNAME` + `LETTERBOXD_PASSWORD`
    - Mode B: `LETTERBOXD_CREDENTIALS=username:password`
    - Mode C (optional fallback): `LETTERBOXD_COOKIE=<full cookie header>`
    - Optional: set `LETTERBOXD_LOGIN_STRATEGY=auto` (default) to prefer direct username/password login.
@@ -115,6 +146,13 @@ Python:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Development and tests:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
 ```
 
 Node MCP server:

@@ -9,8 +9,10 @@ import MovieCard from "../components/MovieCard.vue";
 import { addToWatchlist, markWatched, rateFilm, toggleLike, writeReview } from "../api/letterboxd";
 import type { MovieRecommendation } from "../api/types";
 import { useRecommendationStore } from "../stores/recommendations";
+import { useAppStore } from "../stores/app";
 
 const store = useRecommendationStore();
+const app = useAppStore();
 const pending = ref<{ action: string; movie: MovieRecommendation } | null>(null);
 const actionBusy = ref(false);
 const actionMessage = ref("");
@@ -112,6 +114,7 @@ onMounted(() => {
           v-for="movie in result.movies"
           :key="movie.slug || movie.title"
           :movie="movie"
+          :actions="app.canWriteLetterboxd"
           @action="requestAction"
         />
       </div>
@@ -120,6 +123,7 @@ onMounted(() => {
     </section>
 
     <ActionConfirmDialog
+      v-if="app.canWriteLetterboxd"
       :open="Boolean(pending)"
       :title="dialogTitle"
       :message="pending ? `This will modify your Letterboxd account for ${pending.movie.title}.` : ''"

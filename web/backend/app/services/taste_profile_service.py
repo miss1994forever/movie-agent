@@ -4,16 +4,13 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from crewai import Crew, Process, Task
-
-from movie_rec.agents.agents import create_taste_analyst_agent
 from movie_rec.core.mcp_manager import mcp_session, preflight_check
-from movie_rec.tools.letterboxd_tools import GetUserContextTool
 
 from ..core.settings import get_external_mcp_url
 from ..schemas.taste_profile import TasteProfile, TasteProfileRefreshJobResponse
 from ..storage.database import connect
 from .runtime_status import record_event
+from ..core.settings import can_read_letterboxd, is_demo_mode
 
 
 _refresh_jobs: dict[str, TasteProfileRefreshJobResponse] = {}
@@ -76,6 +73,32 @@ async def save_taste_profile(profile: TasteProfile) -> None:
 
 async def refresh_taste_profile() -> TasteProfile:
     record_event("Refreshing saved taste profile.")
+    if is_demo_mode():
+        from movie_rec.providers.demo import DemoTasteDataProvider
+
+        provider = DemoTasteDataProvider()
+        summary, suggestions = provider.profile_sections()
+        existing = await get_taste_profile()
+        now = _now()
+        profile = TasteProfile(
+            id="default",
+            summary=summary,
+            exploration_suggestions=suggestions,
+            raw_profile=f"## Current Taste Profile\n\n{summary}\n\n## Unexplored Directions\n\n{suggestions}",
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+        await save_taste_profile(profile)
+        record_event("Saved fictional demo taste profile.")
+        return profile
+
+    if not can_read_letterboxd():
+        raise RuntimeError("Letterboxd reads are disabled and no demo provider is active.")
+
+    from crewai import Crew, Process, Task
+    from movie_rec.agents.agents import create_taste_analyst_agent
+    from movie_rec.tools.letterboxd_tools import GetUserContextTool
+
     async with mcp_session(get_external_mcp_url()) as session:
         ok, info = await preflight_check(session)
         if not ok:

@@ -18,12 +18,19 @@ from pydantic import BaseModel, Field
 
 from ..core.mcp_manager import extract_json
 
-nest_asyncio.apply()
+try:
+    nest_asyncio.apply()
+except ValueError:
+    # uvloop cannot be patched. Web calls provide their owning event loop and
+    # use run_coroutine_threadsafe, so importing the tools remains safe there.
+    pass
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
-_SEARCH_FILMS_CACHE: dict[tuple[str, str | None, bool], str] = {}
+_SEARCH_FILMS_CACHE: dict[tuple[str, str | None, bool], tuple[float, str]] = {}
+_SEARCH_CACHE_TTL_SECONDS = 600.0
+_SEARCH_EMPTY_TTL_SECONDS = 30.0
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -238,9 +245,10 @@ class GetUserContextTool(BaseTool):
                 data = _call(self.session, "get_member_films", {"username": resolved_username, "maxPages": 2}, self.event_loop)
                 films = data.get("items") or data.get("films") or []
                 recent = films[:10]
+                titles: list[str] = []
                 if recent:
                     titles = [f.get("title", "?") for f in recent]
-                lines.append(f"[LOW PRIORITY] Recently watched without explicit like/favourite signal: {', '.join(titles)}")
+                    lines.append(f"[LOW PRIORITY] Recently watched without explicit like/favourite signal: {', '.join(titles)}")
                 watched_slugs += [f.get("slug", "") for f in films[:120] if f.get("slug")]
             except Exception as exc:
                 warnings.append(f"Could not read watched films: {exc}")
@@ -317,16 +325,18 @@ class SearchFilmsTool(BaseTool):
         title_query, release_year = _extract_query_title_and_year(query)
         api_key = os.getenv("TMDB_API_KEY", "").strip()
         cache_key = (title_query.lower(), release_year, bool(api_key))
-        cache_hit = cache_key in _SEARCH_FILMS_CACHE
+        cached = _SEARCH_FILMS_CACHE.get(cache_key)
+        cache_hit = bool(cached and cached[0] > time.monotonic())
+        if cached and not cache_hit:
+            _SEARCH_FILMS_CACHE.pop(cache_key, None)
         try:
             if cache_hit:
-                result = _SEARCH_FILMS_CACHE[cache_key]
-                return result
+                return cached[1]
 
             if api_key:
                 result = self._tmdb_search(title_query, api_key, preferred_year=release_year)
                 if result:
-                    _SEARCH_FILMS_CACHE[cache_key] = result
+                    _SEARCH_FILMS_CACHE[cache_key] = (time.monotonic() + _SEARCH_CACHE_TTL_SECONDS, result)
                     return result
 
                 if not _env_flag("MOVIE_REC_LETTERBOXD_SEARCH_FALLBACK", default=False):
@@ -334,15 +344,15 @@ class SearchFilmsTool(BaseTool):
                         f"No fast TMDB results found for '{query}'. "
                         "Try a concrete known film title, or estimate a likely Letterboxd slug and call get_film."
                     )
-                    _SEARCH_FILMS_CACHE[cache_key] = result
+                    _SEARCH_FILMS_CACHE[cache_key] = (time.monotonic() + _SEARCH_EMPTY_TTL_SECONDS, result)
                     return result
 
             letterboxd_result = self._letterboxd_search(query, preferred_year=release_year)
             if letterboxd_result:
-                _SEARCH_FILMS_CACHE[cache_key] = letterboxd_result
+                _SEARCH_FILMS_CACHE[cache_key] = (time.monotonic() + _SEARCH_CACHE_TTL_SECONDS, letterboxd_result)
                 return letterboxd_result
             result = f"No results found for '{query}'."
-            _SEARCH_FILMS_CACHE[cache_key] = result
+            _SEARCH_FILMS_CACHE[cache_key] = (time.monotonic() + _SEARCH_EMPTY_TTL_SECONDS, result)
             return result
         finally:
             elapsed = time.perf_counter() - started

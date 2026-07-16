@@ -134,9 +134,10 @@ async function saveConfig() {
       <div class="section-header">
         <div>
           <h1>Settings</h1>
-          <p>Secrets are written to the backend `.env`; existing secret values are never shown in the browser.</p>
+          <p v-if="app.isDemoMode">Public demo mode is active. Runtime secrets and account settings cannot be edited.</p>
+          <p v-else>Secrets are written to the backend `.env`; existing secret values are never shown in the browser.</p>
         </div>
-        <button type="button" class="secondary-button" @click="configEditing = !configEditing">
+        <button v-if="app.canWriteConfig" type="button" class="secondary-button" @click="configEditing = !configEditing">
           {{ configEditing ? "Hide Configuration" : "Edit Configuration" }}
         </button>
       </div>
@@ -151,7 +152,7 @@ async function saveConfig() {
         </div>
       </div>
       <p v-if="configMessage" class="info-banner">{{ configMessage }}</p>
-      <form v-if="configEditing" class="config-form" @submit.prevent="saveConfig">
+      <form v-if="configEditing && app.canWriteConfig" class="config-form" @submit.prevent="saveConfig">
         <div class="config-grid">
           <label>
             <span>DashScope API key</span>
@@ -222,7 +223,7 @@ async function saveConfig() {
       </form>
     </section>
 
-    <section class="settings-section">
+    <section v-if="!app.isDemoMode" class="settings-section">
       <div class="section-header">
         <div>
           <h1>Letterboxd Verification</h1>

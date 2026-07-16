@@ -13,6 +13,11 @@ export const useAppStore = defineStore("app", {
     authError: "",
     theme: "dark" as ThemeMode,
   }),
+  getters: {
+    isDemoMode: (state) => Boolean(state.auth?.config.demo_mode),
+    canWriteConfig: (state) => Boolean(state.auth?.config.config_write_enabled),
+    canWriteLetterboxd: (state) => Boolean(state.auth?.config.letterboxd_write_enabled),
+  },
   actions: {
     applyTheme() {
       if (typeof document === "undefined") return;

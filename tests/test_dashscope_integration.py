@@ -6,7 +6,16 @@
 import asyncio
 import os
 import sys
+import pytest
 from dotenv import load_dotenv
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.getenv("RUN_DASHSCOPE_INTEGRATION_TESTS") != "1",
+        reason="set RUN_DASHSCOPE_INTEGRATION_TESTS=1 to call external AI providers",
+    ),
+]
 
 # 加载环境变量
 load_dotenv()

@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import HTTPException
 
-from ..core.settings import get_external_mcp_url
+from ..core.settings import can_write_letterboxd, get_external_mcp_url
 
 from movie_rec.core.mcp_manager import extract_json, mcp_session, preflight_check
 
@@ -82,6 +82,8 @@ async def deep_check_auth() -> dict:
 
 
 async def call_write_tool(tool_name: str, args: dict, confirmed: bool) -> dict:
+    if not can_write_letterboxd():
+        raise HTTPException(status_code=403, detail="Letterboxd write actions are disabled by server policy.")
     if not confirmed:
         raise HTTPException(status_code=400, detail="Explicit confirmation is required.")
     async with mcp_session(get_external_mcp_url()) as session:

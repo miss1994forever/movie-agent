@@ -142,9 +142,6 @@ class LetterboxdClient {
 
     if (process.env.LETTERBOXD_COOKIE) {
       this._storeCookieHeaderString(process.env.LETTERBOXD_COOKIE);
-      if (this.cookieHeader.includes('letterboxd.user.CURRENT') || this.cookieHeader.includes('persona')) {
-        this.isLoggedIn = true;
-      }
     }
   }
 
@@ -283,18 +280,9 @@ class LetterboxdClient {
   }
 
   async refreshLoginState() {
-    const markerCookies =
-      this.cookies['letterboxd.user.CURRENT'] ||
-      this.cookies['persona'] ||
-      this.cookies['letterboxd.session'];
-
-    if (markerCookies) {
-      this.isLoggedIn = true;
-      if (!this.username || this.username.includes('@')) {
-        const cookieSlug = this._extractUserSlugFromCookies();
-        if (cookieSlug) this.username = cookieSlug;
-      }
-    }
+    // A cookie name is only a candidate session marker. Expired cookies often
+    // remain present, so authentication is true only after a remote page proves it.
+    this.isLoggedIn = false;
 
     try {
       const home = await this._request('GET', this.baseUrl, { skipLogin: true });
@@ -1283,7 +1271,6 @@ class LetterboxdClient {
       if (this.cookieHeader && (this.cookieHeader.includes('letterboxd.user.CURRENT') || 
           this.cookieHeader.includes('persona') || this.cookieHeader.includes('letterboxd.session'))) {
         console.error('[Letterboxd] Cookie contains session markers, verifying...');
-        this.isLoggedIn = true;
         await this.refreshLoginState();
         
         if (this.isLoggedIn) {
@@ -1300,7 +1287,6 @@ class LetterboxdClient {
     // Check again if cookies were set manually after constructor (legacy check)
     if (!envCookie && this.cookieHeader && (this.cookieHeader.includes('letterboxd.user.CURRENT') || this.cookieHeader.includes('persona'))) {
       console.error('[Letterboxd] Using existing cookie header');
-      this.isLoggedIn = true;
       await this.refreshLoginState();
       if (this.isLoggedIn) {
         return;

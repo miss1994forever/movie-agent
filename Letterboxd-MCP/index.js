@@ -15,6 +15,7 @@ const PORT = envInt(process.env.PORT, 3000);
 const TOOL_TIMEOUT_MS = envInt(process.env.LETTERBOXD_TOOL_TIMEOUT_MS, 300000);
 const MAX_RESPONSE_BYTES = envInt(process.env.LETTERBOXD_MAX_RESPONSE_BYTES, 0);
 const API_KEY = process.env.MCP_API_KEY || '';
+const BIND_HOST = process.env.MCP_BIND_HOST || '127.0.0.1';
 const MODE =
   (process.argv.find((arg) => arg.startsWith('--mode=')) || '').split('=')[1] || 'sse';
 
@@ -293,6 +294,15 @@ async function startSSE() {
   const app = express();
   const sessions = new Map();
 
+  if (API_KEY) {
+    app.use((req, res, next) => {
+      const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const supplied = req.headers['x-api-key'] || req.query.apiKey || bearer;
+      if (supplied !== API_KEY) return res.status(401).send('Unauthorized');
+      next();
+    });
+  }
+
   app.get('/sse', async (req, res) => {
     const transport = new SSEServerTransport('/messages', res);
     await server.connect(transport);
@@ -312,9 +322,9 @@ async function startSSE() {
     await transport.handlePostMessage(req, res, req.body);
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.error(`Letterboxd MCP Server running on http://0.0.0.0:${PORT}`);
-    console.error(`MCP endpoint: http://0.0.0.0:${PORT}/sse`);
+  app.listen(PORT, BIND_HOST, () => {
+    console.error(`Letterboxd MCP Server running on http://${BIND_HOST}:${PORT}`);
+    console.error(`MCP endpoint: http://${BIND_HOST}:${PORT}/sse`);
   });
 }
 
