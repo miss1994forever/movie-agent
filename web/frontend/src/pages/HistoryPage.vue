@@ -6,6 +6,7 @@ import MovieCard from "../components/MovieCard.vue";
 import { deleteHistoryItem, listHistory } from "../api/history";
 import type { RecommendationJob } from "../api/types";
 import { useRecommendationStore } from "../stores/recommendations";
+import { copy, language, localizedMovie, localizedResult } from "../locale";
 
 const recommendationStore = useRecommendationStore();
 const items = ref<RecommendationJob[]>([]);
@@ -41,13 +42,13 @@ onMounted(refresh);
   <div class="history-layout">
     <section class="history-list">
       <header>
-        <h1>History</h1>
+        <h1>{{ copy().historyTitle }}</h1>
         <button type="button" class="secondary-button" @click="refresh">
-          {{ loading ? "Loading..." : "Refresh" }}
+          {{ loading ? copy().loading : copy().refresh }}
         </button>
       </header>
       <p v-if="error" class="error-banner">{{ error }}</p>
-      <p v-if="!items.length && !loading" class="empty-state">No recommendation history yet.</p>
+      <p v-if="!items.length && !loading" class="empty-state">{{ copy().noHistory }}</p>
       <article
         v-for="item in items"
         :key="item.job_id || item.id"
@@ -57,12 +58,13 @@ onMounted(refresh);
       >
         <div>
           <strong>{{ item.mood }}</strong>
-          <p>{{ new Date(item.created_at).toLocaleString() }}</p>
+          <p>{{ new Date(item.created_at).toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US') }}</p>
         </div>
         <button
           v-if="item.job_id || item.id"
           type="button"
-          title="Delete"
+          :title="copy().delete"
+          :aria-label="copy().delete"
           @click.stop="removeItem((item.job_id || item.id) as string)"
         >
           <Trash2 :size="17" />
@@ -72,19 +74,19 @@ onMounted(refresh);
 
     <section class="history-detail">
       <template v-if="selected">
-        <p>Saved Recommendation</p>
+        <p>{{ copy().saved }}</p>
         <h2>{{ selected.mood }}</h2>
         <div v-if="selected.movies.length" class="movie-grid">
           <MovieCard
             v-for="movie in selected.movies"
             :key="movie.slug || movie.title"
-            :movie="movie"
+            :movie="localizedMovie(movie)"
             :actions="false"
           />
         </div>
-        <MarkdownView :content="selected.result_text" />
+        <MarkdownView :content="localizedResult(selected)" />
       </template>
-      <p v-else class="empty-state">Select a recommendation.</p>
+      <p v-else class="empty-state">{{ copy().select }}</p>
     </section>
   </div>
 </template>

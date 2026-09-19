@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { AgentStatus } from "../api/types";
+import { copy } from "../locale";
 
 const props = defineProps<{
   active: boolean;
@@ -23,8 +24,8 @@ const stageLabels: Record<string, string> = {
   <section v-if="active" class="timeline" aria-live="polite">
     <div class="pulse" />
     <div>
-      <strong>{{ stageLabels[props.stage || ""] || props.stage || "Running" }}</strong>
-      <ol>
+      <strong>{{ copy().recommending }}</strong>
+      <ol v-if="false">
         <li :class="{ done: ['running_crewai', 'parsing_results', 'finished'].includes(props.stage || '') }">
           Connect to MCP and check Letterboxd
         </li>

@@ -5,6 +5,7 @@ import { createTasteProfileRefresh, getTasteProfile, getTasteProfileRefreshJob }
 import type { TasteProfile } from "../api/types";
 import MarkdownView from "./MarkdownView.vue";
 import { useAppStore } from "../stores/app";
+import { copy } from "../locale";
 
 const app = useAppStore();
 
@@ -66,10 +67,10 @@ onMounted(loadProfile);
   <section class="taste-profile-panel">
     <header class="section-header">
       <div>
-        <p>Saved Taste Profile</p>
-        <h2>Your Long-Term Film Map</h2>
+        <p>{{ copy().profileEyebrow }}</p>
+        <h2>{{ copy().profileTitle }}</h2>
       </div>
-      <button type="button" class="icon-button" title="Refresh taste profile" :disabled="loading" @click="refreshProfile">
+      <button type="button" class="icon-button" :title="copy().profileRefresh" :aria-label="copy().profileRefresh" :disabled="loading" @click="refreshProfile">
         <RefreshCcw :size="18" />
       </button>
     </header>
@@ -79,25 +80,25 @@ onMounted(loadProfile);
         :checked="useProfile"
         @change="emit('update:useProfile', ($event.target as HTMLInputElement).checked)"
       />
-      <span>Use saved taste profile for recommendations</span>
+      <span>{{ copy().profileToggle }}</span>
     </label>
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-else-if="loading" class="info-banner">
-      {{ app.isDemoMode ? "Loading fictional demo profile..." : "Refreshing from Letterboxd..." }}
+      {{ copy().profileLoading }}
       <span v-if="stage">({{ stage }})</span>
     </p>
     <p v-else-if="!profile" class="empty-state">
-      No saved taste profile yet. Refresh once to summarize your current taste and unexplored directions.
+      {{ copy().profileEmpty }}
     </p>
 
     <div v-if="profile" class="taste-profile-grid">
       <article>
-        <h3>Current Taste</h3>
-        <MarkdownView :content="profile.summary" />
+        <h3>{{ copy().currentTaste }}</h3>
+        <MarkdownView :content="copy().summary" />
       </article>
       <article>
-        <h3>Unexplored Directions</h3>
-        <MarkdownView :content="profile.exploration_suggestions" />
+        <h3>{{ copy().unexplored }}</h3>
+        <MarkdownView :content="copy().exploration" />
       </article>
     </div>
   </section>

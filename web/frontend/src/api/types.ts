@@ -2,12 +2,17 @@ export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancell
 
 export interface MovieRecommendation {
   title: string;
+  title_zh?: string | null;
+  title_en?: string | null;
   year?: number | null;
   slug?: string | null;
   director?: string | null;
   reason?: string | null;
+  reason_zh?: string | null;
+  reason_en?: string | null;
   letterboxd_url?: string | null;
   poster_url?: string | null;
+  backdrop_url?: string | null;
 }
 
 export interface RecommendationJob {

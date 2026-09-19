@@ -2,11 +2,12 @@
 import { computed, onMounted } from "vue";
 import { RefreshCcw } from "lucide-vue-next";
 import { useAppStore } from "../stores/app";
+import { copy } from "../locale";
 
 const app = useAppStore();
 
 const statusText = computed(() => {
-  if (app.isDemoMode) return "Portfolio demo · fictional sample data";
+  if (app.isDemoMode) return copy().status;
   if (app.authLoading) return "Checking Letterboxd...";
   if (app.auth?.ok) return `Connected${app.auth.username ? ` as @${app.auth.username}` : ""}`;
   if (app.authError) return "Backend unavailable";

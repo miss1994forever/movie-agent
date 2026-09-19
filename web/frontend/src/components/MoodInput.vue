@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { Send } from "lucide-vue-next";
+import { copy } from "../locale";
 
 const props = defineProps<{
   loading: boolean;
+  disabled?: boolean;
   modelValue: string;
 }>();
 
@@ -10,13 +12,6 @@ const emit = defineEmits<{
   submit: [string];
   "update:modelValue": [string];
 }>();
-
-const quickMoods = [
-  "Something light but lingering",
-  "Pick something from my watchlist for tonight",
-  "A Wong Kar-wai mood, but not too heavy",
-  "I just finished exams and want something healing",
-];
 
 function submit() {
   const value = props.modelValue.trim();
@@ -31,24 +26,24 @@ function updateMood(value: string) {
 
 <template>
   <section class="mood-panel">
-    <label for="mood">What's your mood today?</label>
+    <label for="mood">{{ copy().moodLabel }}</label>
     <textarea
       id="mood"
       :value="modelValue"
-      rows="5"
-      placeholder="For example: I'm a little tired tonight and want something smart, light, and not too long."
+      rows="3"
+      :placeholder="copy().moodPlaceholder"
       @input="updateMood(($event.target as HTMLTextAreaElement).value)"
       @keydown.meta.enter.prevent="submit"
       @keydown.ctrl.enter.prevent="submit"
     />
     <div class="chips">
-      <button v-for="item in quickMoods" :key="item" type="button" @click="updateMood(item)">
+      <button v-for="item in copy().moodChips" :key="item" type="button" @click="updateMood(item)">
         {{ item }}
       </button>
     </div>
-    <button class="primary-button" type="button" :disabled="loading || !modelValue.trim()" @click="submit">
+    <button class="primary-button" type="button" :disabled="loading || disabled || !modelValue.trim()" @click="submit">
       <Send :size="18" />
-      <span>{{ loading ? "Recommending..." : "Get Recommendations" }}</span>
+      <span>{{ loading ? copy().recommending : copy().getRecommendations }}</span>
     </button>
   </section>
 </template>

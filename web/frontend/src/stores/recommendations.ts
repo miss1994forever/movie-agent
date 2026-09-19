@@ -5,7 +5,7 @@ import { getBackendStatus } from "../api/status";
 import type { RecommendationJob } from "../api/types";
 
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-const STORAGE_KEY = "movie-rec.recommendations";
+const STORAGE_KEY = import.meta.env.VITE_LIVE_API_URL ? "movie-rec.live-recommendations" : "movie-rec.recommendations";
 
 interface SavedState {
   draftMood: string;

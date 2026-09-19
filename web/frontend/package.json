@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc -b && vite build",
+    "test:import": "node --test tests/*.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^5.2.0",
+    "fflate": "^0.8.2",
     "lucide-vue-next": "^0.468.0",
     "pinia": "^2.2.6",
     "vant": "^4.9.8",
